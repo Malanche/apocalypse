@@ -1,6 +1,6 @@
 //! # Apocalypse: Simple Actor framework for Rust.
 //!
-//! Apocalyptic is a simple actor framework inspired by actix. The goal is to have a fully asynchronous framework with few disadvantages. A simple working example is the following
+//! Apocalypse is a simple actor framework inspired by actix. The goal is to have a fully asynchronous framework with few disadvantages. A simple working example is the following
 //!
 //! ```rust
 //! use apocalypse::{Hell, Demon};
