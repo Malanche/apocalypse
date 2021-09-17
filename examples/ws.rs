@@ -1,6 +1,10 @@
 //! This example is by no-means a full websockets example
 //! Please do not use it for anything serious, as it skipps the
 //! websockets handshake.
+fn main() {
+    
+}
+/*
 use apocalypse::{Hell, Demon};
 use cataclysm_ws::{WebSocketReader, Frame, Message};
 use tokio::net::{TcpStream, TcpListener};
@@ -90,3 +94,4 @@ async fn main() {
     // We wait for all messages to be processed.
     jh.await.unwrap();
 }
+*/
