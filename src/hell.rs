@@ -1,5 +1,5 @@
 use std::collections::{HashMap};
-use crate::{AnyDemon, Gate, Error};
+use crate::{DemonWrapper, Gate, Error};
 use tokio::{
     sync::{
         mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -7,11 +7,15 @@ use tokio::{
     },
     task::JoinHandle
 };
-use futures::{select_biased, future::FutureExt};
+use futures::{future::FutureExt};
 use std::any::Any;
 
 use self::mini_hell::MiniHell;
 mod mini_hell;
+#[cfg(feature = "ws")]
+use self::mini_ws_hell::MiniWSHell;
+#[cfg(feature = "ws")]
+mod mini_ws_hell;
 
 pub(crate) use self::action::{Action};
 mod action;
@@ -22,14 +26,14 @@ mod action;
 pub struct Hell {
     // Demon counter, to asign a unique address to each demon
     counter: usize,
-    // Communication channels with demons
+    // Communication channels with demons.
     demons: HashMap<usize, UnboundedSender<(Sender<Result<Box<dyn Any + Send>, Error>>, Box<dyn Any + Send>)>>,
     // Current gate to current hell. Invalid once hell starts loose
     gate: Gate,
     // Source queue of messages
     message_source: UnboundedReceiver<Action>,
     // Demon queue, where new demons arrive
-    demon_source: UnboundedReceiver<(Sender<usize>, Box<dyn AnyDemon>)>
+    demon_source: UnboundedReceiver<(Sender<usize>, DemonWrapper)>
 }
 
 impl Hell {
@@ -84,7 +88,7 @@ impl Hell {
             #[cfg(feature = "debug")]
             log::info!("Hell starts to burn \u{1f525}");
             loop {
-                select_biased! {
+                tokio::select! {
                     value = self.message_source.recv().fuse() => {
                         if let Some(action) = value {
                             match action {
@@ -122,7 +126,11 @@ impl Hell {
                                 
                                 self.counter += 1;
                                 let (mhtx, mhrx) = mpsc::unbounded_channel();
-                                MiniHell::spawn(demon, mhrx);
+                                match demon {
+                                    DemonWrapper::Demon(demon) => MiniHell::spawn(demon, mhrx),
+                                    #[cfg(feature = "ws")]
+                                    DemonWrapper::WSDemon(demon, read_stream) => MiniWSHell::spawn(demon, mhrx, read_stream)
+                                }
                                 self.demons.insert(current_counter, mhtx);
                             } else {
                                 #[cfg(feature = "debug")]

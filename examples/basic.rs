@@ -20,7 +20,7 @@ impl Demon for Human {
 #[tokio::main]
 async fn main() {
     // We create one demon
-    let carlos = Human{
+    let carlos = Human {
         name: "Carlos".to_string()
     };
 

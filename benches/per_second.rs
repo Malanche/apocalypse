@@ -1,5 +1,4 @@
 use criterion::*;
-use criterion::async_executor::FuturesExecutor;
 use apocalypse::{Hell, Demon};
 
 // Human demon that echoes a message with its name
@@ -33,7 +32,7 @@ fn bench(c: &mut Criterion) {
                 (gate, locations)
             });
     
-            b.to_async(FuturesExecutor).iter(|| async {
+            b.to_async(rt).iter(|| async {
                 let futs = locations.iter().map(|location| gate.send(&location, ()));
     
                 let res = futures::future::join_all(futs).await;

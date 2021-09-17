@@ -1,7 +1,11 @@
-use crate::{Error, Demon, AnyDemon, Location, hell::Action};
+use crate::{Error, Demon, DemonWrapper, Location, hell::Action};
 use tokio::sync::{mpsc::UnboundedSender, oneshot::{self, Sender}};
 use std::future::{Future};
 use std::marker::PhantomData;
+#[cfg(feature = "ws")]
+use cataclysm_ws::{WebSocketReader};
+#[cfg(feature = "ws")]
+use tokio::net::tcp::OwnedReadHalf;
 
 /// ## Gate structure
 ///
@@ -17,7 +21,7 @@ pub struct Gate {
     /// Message queue
     message_sink: UnboundedSender<Action>,
     /// Demon queue
-    demon_sink: UnboundedSender<(Sender<usize>, Box<dyn AnyDemon>)>
+    demon_sink: UnboundedSender<(Sender<usize>, DemonWrapper)>
 }
 
 impl Clone for Gate {
@@ -31,7 +35,7 @@ impl Clone for Gate {
 
 impl Gate {
     /// Creates a new gate. For internal use only.
-    pub(crate) fn new(message_sink: UnboundedSender<Action>, demon_sink: UnboundedSender<(Sender<usize>, Box<dyn AnyDemon>)>) -> Gate {
+    pub(crate) fn new(message_sink: UnboundedSender<Action>, demon_sink: UnboundedSender<(Sender<usize>, DemonWrapper)>) -> Gate {
         Gate {
             message_sink,
             demon_sink
@@ -132,7 +136,63 @@ impl Gate {
 
         // So we don't capture self, we execute the sending right here, and deal with the error in the
         // async block
-        let res = self.demon_sink.send((tx, Box::new(demon))).map_err(|e| Error::TokioSend(format!("{}", e)));
+        let res = self.demon_sink.send((tx, DemonWrapper::Demon(Box::new(demon)))).map_err(|e| Error::TokioSend(format!("{}", e)));
+
+        async move {
+            res?; // Throw the error!
+            #[cfg(feature = "debug")]
+            log::info!("Adding new demon to hell");
+            // One shot channel to get the address back
+            let address = rx.await.map_err(|s| Error::TokioSend(format!("{}", s)))?;
+
+            Ok(Location {
+                address,
+                phantom: PhantomData
+            })
+        }
+    }
+
+    /// Spawns a demon with websockets processing in hell
+    ///
+    /// ```rust,no_run
+    /// use apocalypse::{Hell, Demon};
+    /// use cataclysm_ws::{WebSocketReader, Message};
+    ///
+    /// struct Basic{}
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Demon for Basic {
+    ///     type Input = ();
+    ///     type Output = ();
+    ///     async fn handle(&mut self, message: Self::Input) -> Self::Output {
+    ///         println!("Hello, world!");
+    ///     }
+    /// }
+    /// 
+    /// #[async_trait::async_trait]
+    /// impl WebSocketReader for Basic {
+    ///     async fn on_message(&mut self, message: Message) {
+    ///         // ... do nothing
+    ///     }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let hell = Hell::new();
+    ///     let (gate, join_handle) = hell.fire().await.unwrap();
+    ///     // In order to spawn, you should be able to obtain a
+    ///     // OwnedHalfRead tcp stream from tokio, which is already 
+    ///     // past the handshake protocol
+    ///     // -> let _location = gate.spawn_ws(Basic{}, read_stream).await;
+    /// }
+    /// ```
+    #[cfg(feature = "ws")]
+    pub fn spawn_ws<D: 'static + Demon<Input = I, Output = O> + WebSocketReader, I: 'static + Send, O: 'static + Send>(&self, demon: D, read_stream: OwnedReadHalf) -> impl Future<Output = Result<Location<D>, Error>> {
+        let (tx, rx) = oneshot::channel();
+
+        // So we don't capture self, we execute the sending right here, and deal with the error in the
+        // async block
+        let res = self.demon_sink.send((tx, DemonWrapper::WSDemon(Box::new(demon), read_stream))).map_err(|e| Error::TokioSend(format!("{}", e)));
 
         async move {
             res?; // Throw the error!

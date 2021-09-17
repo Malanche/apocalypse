@@ -4,9 +4,10 @@ use tokio::sync::{oneshot::Sender, mpsc::UnboundedReceiver};
 
 /// Structure that holds a single demon, and asynchronously deals with the messages that this demon receives.
 pub(crate) struct MiniHell {
+    /// Demon contained inside this minihell instance
     demon: Box<dyn AnyDemon>,
     /// Channel where to reply, and value to be fed to the demon
-    queue: UnboundedReceiver<(Sender<Result<Box<dyn Any + Send>, Error>>, Box<dyn Any + Send>)>,
+    queue: UnboundedReceiver<(Sender<Result<Box<dyn Any + Send>, Error>>, Box<dyn Any + Send>)>
 }
 
 impl MiniHell {
