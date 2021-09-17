@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use std::hash::{Hash, Hasher};
 
 /// Demon's location (to be able to send messages).
 ///
@@ -16,5 +17,11 @@ impl<E> Clone for Location<E> {
             address: self.address,
             phantom: PhantomData
         }
+    }
+}
+
+impl<E> Hash for Location<E> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.address.hash(state);
     }
 }
