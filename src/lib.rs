@@ -57,9 +57,6 @@
 //! As you can see, you will need to use [async_trait](https://docs.rs/async_trait) in order to implement the [Demon](crate::Demon) trait in your code.
 
 pub use self::demon::{Demon, Location};
-pub(crate) use crate::demon::{AnyDemon, DemonWrapper};
-#[cfg(feature = "ws")]
-pub(crate) use crate::demon::{AnyWSDemon};
 pub use self::hell::Hell;
 pub use self::gate::{Gate};
 pub use self::error::Error;

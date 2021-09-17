@@ -1,24 +1,24 @@
 use std::collections::{HashMap};
-use crate::{DemonWrapper, Gate, Error};
+use crate::{Gate, Error};
 use tokio::{
     sync::{
-        mpsc::{self, UnboundedReceiver, UnboundedSender},
-        oneshot::{Sender}
+        mpsc::{self, UnboundedSender}
     },
     task::JoinHandle
 };
-use futures::{future::FutureExt};
-use std::any::Any;
 
-use self::mini_hell::MiniHell;
+pub(crate) use self::mini_hell::MiniHell;
 mod mini_hell;
 #[cfg(feature = "ws")]
-use self::mini_ws_hell::MiniWSHell;
+pub(crate) use self::mini_ws_hell::MiniWSHell;
 #[cfg(feature = "ws")]
 mod mini_ws_hell;
 
-pub(crate) use self::action::{Action};
-mod action;
+pub(crate) use self::hell_instruction::{HellInstruction};
+mod hell_instruction;
+
+pub(crate) use self::mini_hell_instruction::{MiniHellInstruction};
+mod mini_hell_instruction;
 
 /// ## Hell structure
 ///
@@ -27,13 +27,7 @@ pub struct Hell {
     // Demon counter, to asign a unique address to each demon
     counter: usize,
     // Communication channels with demons.
-    demons: HashMap<usize, UnboundedSender<(Sender<Result<Box<dyn Any + Send>, Error>>, Box<dyn Any + Send>)>>,
-    // Current gate to current hell. Invalid once hell starts loose
-    gate: Gate,
-    // Source queue of messages
-    message_source: UnboundedReceiver<Action>,
-    // Demon queue, where new demons arrive
-    demon_source: UnboundedReceiver<(Sender<usize>, DemonWrapper)>
+    demons: HashMap<usize, UnboundedSender<MiniHellInstruction>>
 }
 
 impl Hell {
@@ -45,20 +39,9 @@ impl Hell {
     /// // Now we can span demons!
     /// ```
     pub fn new() -> Hell {
-        // Message communication for portals
-        let (message_sink, message_source) = mpsc::unbounded_channel();
-
-        // Message communication for demons
-        let (demon_sink, demon_source) = mpsc::unbounded_channel();
-
-        let gate = Gate::new(message_sink, demon_sink);
-
         Hell {
             counter: 0,
             demons: HashMap::new(),
-            gate,
-            message_source,
-            demon_source
         }
     }
 
@@ -80,71 +63,87 @@ impl Hell {
     /// }
     /// ```
     pub async fn fire(mut self) -> Result<(Gate, JoinHandle<()>), Error>{
-        let (tempm, _) = mpsc::unbounded_channel();
-        let (tempd, _) = mpsc::unbounded_channel();
-        let gate = std::mem::replace(&mut self.gate, Gate::new(tempm, tempd));
+        // Message communication for the gate
+        let (hell_channel, mut instructions) = mpsc::unbounded_channel();
+        
+        let gate = Gate::new(hell_channel);
+        let gate_clone = gate.clone();
 
         let jh = tokio::spawn(async move {
-            #[cfg(feature = "debug")]
+            #[cfg(feature = "internal_log")]
             log::info!("Hell starts to burn \u{1f525}");
             loop {
                 tokio::select! {
-                    value = self.message_source.recv().fuse() => {
-                        if let Some(action) = value {
-                            match action {
-                                Action::Invoke{tx, address, input} => {
-                                    if let Some(demon) = self.demons.get_mut(&address) {
-                                        if demon.send((tx, input)).is_err() {
-                                            log::warn!("Message could not be delivered to demon {}", address);
-                                        };
-                                    } else {
-                                        if tx.send(Err(Error::InvalidLocation)).is_err() {
-                                            log::warn!("Message could not be delivered to demon {}", address);
-                                        };
+                    value = instructions.recv() => if let Some(instruction) = value {
+                        match instruction {
+                            HellInstruction::CreateAddress{tx} => {
+                                let current_counter = self.counter;
+                                if tx.send(current_counter).is_ok() {
+                                    self.counter += 1;
+                                } else {
+                                    #[cfg(feature = "internal_log")]
+                                    log::warn!("Could not create a new address.");
+                                }
+                            },
+                            HellInstruction::RegisterDemon{address, channel, tx} => {
+                                let sent = match self.demons.entry(address) {
+                                    std::collections::hash_map::Entry::Occupied(_) => {
+                                        #[cfg(feature = "internal_log")]
+                                        log::debug!("Demon address {} is already taken", address);
+                                        false
+                                    },
+                                    std::collections::hash_map::Entry::Vacant(v) => {
+                                        #[cfg(feature = "internal_log")]
+                                        log::debug!("Registering new demon with address {}", address);
+                                        v.insert(channel);
+                                        true
                                     }
-                                },
-                                Action::Kill{address} => {
-                                    // We simply drop the channel, so the mini hell will close automatically
-                                    if self.demons.remove(&address).is_none() {
-                                        #[cfg(feature = "debug")]
-                                        log::warn!("Trying to remove non-existent demon...");
+                                };
+
+                                if tx.send(sent).is_err() {
+                                    #[cfg(feature = "internal_log")]
+                                    log::warn!("Dangling demon, as no answer could be returned.");
+                                    self.demons.remove(&address);
+                                }
+                            },
+                            HellInstruction::Message{tx, address, input} => {
+                                if let Some(demon) = self.demons.get_mut(&address) {
+                                    if demon.send(MiniHellInstruction::Message(tx, input)).is_err() {
+                                        log::debug!("Message could not be delivered to demon {}", address);
+                                    };
+                                } else {
+                                    if tx.send(Err(Error::InvalidLocation)).is_err() {
+                                        log::debug!("Delivery failure notification could not arrive to demon {} caller", address);
+                                    };
+                                }
+                            },
+                            HellInstruction::RemoveDemon{address, tx} => {
+                                // We simply drop the channel, so the mini hell will close automatically
+                                let removed = self.demons.remove(&address);
+                                if let Some(channel) = removed {
+                                    if channel.send(MiniHellInstruction::Shutdown).is_err() {
+                                        log::warn!("Could not notify demon minihell for demon removal");
+                                        if tx.send(false).is_err() {
+                                            log::warn!("Could not notify demon removal failure");
+                                        }
+                                    }
+                                } else {
+                                    #[cfg(feature = "internal_log")]
+                                    log::debug!("The removal address did not exist");
+                                    if tx.send(true).is_err() {
+                                        log::warn!("Could not notify demon removal");
                                     }
                                 }
                             }
-                        } else {
-                            #[cfg(feature = "debug")]
-                            log::info!("All portals have been dropped, hell goes cold \u{1f9ca}");
-                            break;
                         }
-                    },
-                    value = self.demon_source.recv().fuse() => {
-                        if let Some((tx, demon)) = value {
-                            let current_counter = self.counter;
-                            if tx.send(current_counter).is_ok() {
-                                #[cfg(feature = "debug")]
-                                log::info!("Spawning new demon with address {}", current_counter);
-                                
-                                self.counter += 1;
-                                let (mhtx, mhrx) = mpsc::unbounded_channel();
-                                match demon {
-                                    DemonWrapper::Demon(demon) => MiniHell::spawn(demon, mhrx),
-                                    #[cfg(feature = "ws")]
-                                    DemonWrapper::WSDemon(demon, read_stream) => MiniWSHell::spawn(demon, mhrx, read_stream)
-                                }
-                                self.demons.insert(current_counter, mhtx);
-                            } else {
-                                #[cfg(feature = "debug")]
-                                log::warn!("Dangling demon with address {}, removing from hell.", current_counter);
-                            }
-                        } else {
-                            // As both sinks travel together in a portal, this block either
-                            // 1. Is never called
-                            // 2. Is called before the messagae_source returns None, which stops the loop
-                        }
+                    } else {
+                        #[cfg(feature = "internal_log")]
+                        log::info!("All portals have been dropped, hell goes cold \u{1f9ca}");
+                        break;
                     }
                 }
             }
         });
-        Ok((gate, jh))
+        Ok((gate_clone, jh))
     }
 }

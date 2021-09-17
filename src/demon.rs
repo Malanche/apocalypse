@@ -1,14 +1,5 @@
 pub use self::location::Location;
-pub(crate) use self::any_demon::AnyDemon;
-pub(crate) use self::demon_wrapper::DemonWrapper;
-mod demon_wrapper;
 mod location;
-mod any_demon;
-
-#[cfg(feature = "ws")]
-pub(crate) use self::any_ws_demon::AnyWSDemon;
-#[cfg(feature = "ws")]
-mod any_ws_demon;
 
 /// Demon trait
 ///
@@ -19,4 +10,12 @@ pub trait Demon: std::marker::Send {
     type Output;
     /// Handler function for messages
     async fn handle(&mut self, message: Self::Input) -> Self::Output;
+    /// Callback, for when the demon is spawned
+    async fn spawned(&mut self, _location: Location<Self>) {
+        ()
+    }
+    /// Callback, for when the demon is dismissed
+    async fn vanquished(&mut self) {
+        ()
+    }
 }
