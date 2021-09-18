@@ -313,4 +313,46 @@ impl Gate {
         }).map_err(|e| Error::TokioSend(format!("{}", e)))?;
         rx.await.map_err(|e| Error::TokioSend(format!("{}", e)))?
     }
+
+    /// Get rid of one demon, and ignore the result
+    ///
+    /// As with [send](crate::Gate::send) and [send_and_ignore](crate::Gate::send_and_ignore), this method is prefered because there is a lower chance of a lockup happening. For example, if you were to allow your own demon to vanquish itself, you should use this method.
+    ///
+    /// ```rust,no_run
+    /// use apocalypse::{Hell, Demon};
+    ///
+    /// struct EchoDemon{}
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Demon for EchoDemon {
+    ///     type Input = &'static str;
+    ///     type Output = ();
+    ///     async fn handle(&mut self, message: Self::Input) -> Self::Output {
+    ///         println!("{}", message);
+    ///     }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let hell = Hell::new();
+    ///     let (gate, join_handle) = hell.fire().await.unwrap();
+    ///     // we spawn the demon
+    ///     let location = gate.spawn(EchoDemon{}).await.unwrap();
+    ///     // In order to prevent lock ups, we send this future to another task
+    ///     gate.vanquish_and_ignore(&location).unwrap();
+    ///     // We await the system
+    ///     join_handle.await.unwrap();
+    /// }
+    /// ```
+    pub fn vanquish_and_ignore<D: 'static + Demon<Input = I, Output = O>, I: 'static + Send, O: 'static + Send>(&self, location: &Location<D>) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.hell_channel.send(HellInstruction::RemoveDemon{
+            address: location.address,
+            tx
+        }).map_err(|e| Error::TokioSend(format!("{}", e)))?;
+        tokio::spawn(async move{
+            let _ = rx.await;
+        });
+        Ok(())
+    }
 }
