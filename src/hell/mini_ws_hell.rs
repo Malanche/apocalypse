@@ -112,6 +112,7 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
                         break;
                     } else {
                         // connection reset by peer! horrible connection
+                        #[cfg(feature = "internal_log")]
                         log::debug!("[{}] connection reset by peer, with some data in the buffer", self.demon.id());
                         break
                     }
