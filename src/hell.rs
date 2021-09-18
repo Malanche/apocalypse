@@ -79,41 +79,45 @@ impl Hell {
                             HellInstruction::CreateAddress{tx} => {
                                 let current_counter = self.counter;
                                 if tx.send(current_counter).is_ok() {
+                                    #[cfg(feature = "internal_log")]
+                                    log::debug!("[Hell] reserved address {}", current_counter);
                                     self.counter += 1;
                                 } else {
                                     #[cfg(feature = "internal_log")]
-                                    log::warn!("Could not create a new address.");
+                                    log::debug!("[Hell] failed to notify address {} reservation", current_counter);
                                 }
                             },
                             HellInstruction::RegisterDemon{address, channel, tx} => {
-                                let sent = match self.demons.entry(address) {
+                                let added = match self.demons.entry(address) {
                                     std::collections::hash_map::Entry::Occupied(_) => {
                                         #[cfg(feature = "internal_log")]
-                                        log::debug!("Demon address {} is already taken", address);
-                                        false
+                                        log::debug!("[Hell] demon address {} is already taken", address);
+                                        Err(Error::OccupiedAddress)
                                     },
                                     std::collections::hash_map::Entry::Vacant(v) => {
                                         #[cfg(feature = "internal_log")]
-                                        log::debug!("Registering new demon with address {}", address);
+                                        log::debug!("[Hell] registering new demon with address {}", address);
                                         v.insert(channel);
-                                        true
+                                        Ok(())
                                     }
                                 };
 
-                                if tx.send(sent).is_err() {
+                                if tx.send(added).is_err() {
                                     #[cfg(feature = "internal_log")]
-                                    log::warn!("Dangling demon, as no answer could be returned.");
+                                    log::debug!("[Hell] dangling demon with address {}, as it could not be notified that it was registered. removing.", address);
                                     self.demons.remove(&address);
                                 }
                             },
                             HellInstruction::Message{tx, address, input} => {
                                 if let Some(demon) = self.demons.get_mut(&address) {
                                     if demon.send(MiniHellInstruction::Message(tx, input)).is_err() {
-                                        log::debug!("Message could not be delivered to demon {}", address);
+                                        #[cfg(feature = "internal_log")]
+                                        log::debug!("[Hell] message could not be delivered to demon {}", address);
                                     };
                                 } else {
                                     if tx.send(Err(Error::InvalidLocation)).is_err() {
-                                        log::debug!("Delivery failure notification could not arrive to demon {} caller", address);
+                                        #[cfg(feature = "internal_log")]
+                                        log::debug!("[Hell] invalid location message for address {} could not be delivered back", address);
                                     };
                                 }
                             },
@@ -122,27 +126,37 @@ impl Hell {
                                 let removed = self.demons.remove(&address);
                                 if let Some(channel) = removed {
                                     if channel.send(MiniHellInstruction::Shutdown).is_err() {
-                                        log::warn!("Could not notify demon minihell for demon removal");
-                                        if tx.send(false).is_err() {
-                                            log::warn!("Could not notify demon removal failure");
+                                        #[cfg(feature = "internal_log")]
+                                        log::debug!("[Hell] could not notify demon thread the requested demon at address {} removal", address);
+                                        if tx.send(Err(Error::DemonCommunication)).is_err() {
+                                            #[cfg(feature = "internal_log")]
+                                            log::debug!("[Hell] could not notify demon at address {} removal failure", address);
+                                        }
+                                    } else {
+                                        if tx.send(Ok(())).is_err() {
+                                            #[cfg(feature = "internal_log")]
+                                            log::debug!("[Hell] could not notify back demon at address {} removal", address);
                                         }
                                     }
                                 } else {
                                     #[cfg(feature = "internal_log")]
-                                    log::debug!("The removal address did not exist");
-                                    if tx.send(true).is_err() {
-                                        log::warn!("Could not notify demon removal");
+                                    log::debug!("[Hell] demon with address {} was not found", address);
+                                    if tx.send(Err(Error::InvalidLocation)).is_err() {
+                                        #[cfg(feature = "internal_log")]
+                                        log::debug!("[Hell] could not notify that demon with address {} was not found", address);
                                     }
                                 }
                             }
                         }
                     } else {
                         #[cfg(feature = "internal_log")]
-                        log::info!("All portals have been dropped, hell goes cold \u{1f9ca}");
+                        log::info!("[Hell] all gates to hell have been dropped");
                         break;
                     }
                 }
             }
+            #[cfg(feature = "internal_log")]
+            log::info!("[Hell] Hell goes cold \u{1f9ca}");
         });
         Ok((gate_clone, jh))
     }

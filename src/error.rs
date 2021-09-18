@@ -9,8 +9,10 @@ pub enum Error {
     WrongType,
     /// Indicates that there is no such demon with this location 
     InvalidLocation,
-    /// Needs to be removed
-    Unimplemented
+    /// Indicates that the address that is trying to be occupied is already taken
+    OccupiedAddress,
+    /// Indicates that communication with the demon could not be stablished (probably a broken channel)
+    DemonCommunication
 }
 
 impl std::fmt::Display for Error {
@@ -18,9 +20,10 @@ impl std::fmt::Display for Error {
         let content = match self {
             Error::TokioSend(detail) => format!("{}", detail),
             Error::IO(e) => format!("{}", e),
-            Error::WrongType => format!("A correct `Any` to `Input` or `Any` to `Output` downcast failed... contact this library's developer"),
-            Error::InvalidLocation => format!("The location is no longer valid"),
-            Error::Unimplemented => format!("Unimplemented feature!")
+            Error::WrongType => format!("a correct `Any` to `Input` or `Any` to `Output` downcast failed... contact this library's developer"),
+            Error::InvalidLocation => format!("the location is no longer valid"),
+            Error::OccupiedAddress => format!("the location for this demon is already taken"),
+            Error::DemonCommunication => format!("message to the demon could not be delivered")
         };
         write!(formatter, "{}", content)
     }

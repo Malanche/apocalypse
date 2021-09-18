@@ -27,6 +27,8 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
     }
 
     async fn fire(mut self) {
+        #[cfg(feature = "internal_log")]
+        log::debug!("[{}] demon thread starting", self.demon.id());
         let (mailbox, mut messages) = mpsc::unbounded_channel::<(Sender<Result<Box<dyn Any + Send>, Error>>, Box<dyn Any + Send>)>();
 
         // We call the spawned function from this demon
@@ -34,45 +36,60 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
         self.demon.spawned(other_loc).await;
 
         loop {
+            #[cfg(feature = "internal_log")]
+            log::debug!("[{}] start of await loop", self.demon.id());
             tokio::select! {
                 res = messages.recv() => if let Some((tx, input)) = res {
                     if let Ok(input) = input.downcast::<I>() {
+                        #[cfg(feature = "internal_log")]
+                        log::warn!("[{}] demon handle processing message...", self.demon.id());   
                         let output = self.demon.handle(*input).await;
                         if tx.send(Ok(Box::new(output))).is_err() {
                             #[cfg(feature = "internal_log")]
-                            log::warn!("[Demon] I worked the answer, but I could not send it back...");   
+                            log::warn!("[{}] demon handle result could not be delivered back", self.demon.id());   
                         }
                     } else {
                         if tx.send(Err(Error::WrongType)).is_err() {
                             #[cfg(feature = "internal_log")]
-                            log::warn!("[Demon] I worked the answer, but I could not send it back...");   
+                            log::warn!("[{}] demon handle received a wrong type and the message could not be delivered back", self.demon.id());   
                         }
                     }
                 } else {
                     #[cfg(feature = "internal_log")]
-                    log::info!("This demon is no longer needed, bye");
+                    log::info!("[{}] all channels to this demon are now closed (impossible)", self.demon.id());
                     break;
                 },
                 res = self.instructions.recv() => match res {
                     Some(instruction) => match instruction {
-                        MiniHellInstruction::Shutdown => break,
+                        MiniHellInstruction::Shutdown => {
+                            #[cfg(feature = "internal_log")]
+                            log::info!("[{}] shutdown signal received", self.demon.id());
+                            break
+                        },
                         MiniHellInstruction::Message(result_mailbox, message) => {
+                            #[cfg(feature = "internal_log")]
+                            log::debug!("[{}] received message, adding to the processing queue", self.demon.id());
                             if mailbox.send((result_mailbox, message)).is_err() {
                                 #[cfg(feature = "internal_log")]
-                                log::warn!("[Demon] Impossible error happened, could not process message...");   
+                                log::warn!("[{}] impossible error happened, could not send back message to itself!", self.demon.id());   
                             }
                         }
                     },
                     None => {
                         #[cfg(feature = "internal_log")]
-                        log::warn!("Instructions will no longer arrive to hosting hell");
+                        log::info!("[{}] all channels to this demon are now closed", self.demon.id());
                         break;
                     }
                 }
             }
+            #[cfg(feature = "internal_log")]
+            log::debug!("[{}] end of await loop", self.demon.id());
         }
 
         // We call the spawned function from this demon
         self.demon.vanquished().await;
+
+        #[cfg(feature = "internal_log")]
+        log::debug!("[{}] demon thread finished", self.demon.id());
     }
 }

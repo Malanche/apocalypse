@@ -41,7 +41,63 @@ impl Gate {
 
     /// Sends a message to a demon
     ///
-    /// In this actor implementaton, all messages do have to return some kind of reply. You can ignore this behaviour by setting your `Output` to () in most situations.
+    /// In this actor implementaton, all messages do have to return some kind of reply. Be aware that this decision can lead to lockups if used carelessly (as the mutable access that the handle function has to the demons blocks the message processing loop until each handle call ends). If you manage to create a message-cycle (that is, a chain of requests that has as element the same actor twice), then you will end up in a lockup situation. Try to use this function **only** when necessary, keep [send_and_ignore](crate::Gate::send_and_ignore) as your first option, unless you carefully thought about the message-chains in your software.
+    ///
+    /// ```rust
+    /// use apocalypse::{Hell, Demon};
+    ///
+    /// struct EchoDemon{}
+    ///
+    /// #[async_trait::async_trait]
+    /// impl Demon for EchoDemon {
+    ///     type Input = &'static str;
+    ///     type Output = String;
+    ///     async fn handle(&mut self, message: Self::Input) -> Self::Output {
+    ///         format!("{}", message);
+    ///     }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let hell = Hell::new();
+    ///     let (gate, join_handle) = hell.fire().await.unwrap();
+    ///     // we spawn the demon
+    ///     let location = gate.spawn(EchoDemon{}).await.unwrap();
+    ///     // In order to prevent lock ups, we send this future to another task
+    ///     tokio::spawn(async move {
+    ///         println!(gate.send(&location, "Hallo, welt!").await.unwrap());
+    ///     });
+    ///     // We await the system
+    ///     join_handle.await.unwrap();
+    /// }
+    /// ```
+    pub async fn send<D, I, O>(&self, location: &Location<D>, message: I) -> Result<O, Error> 
+        where 
+            D: Demon<Input = I, Output = O>,
+            I: 'static + Send,
+            O: 'static + Send {
+        // async channel to get the response
+        let (tx, rx) = oneshot::channel();
+        let address = location.address;
+        
+        self.hell_channel.send(HellInstruction::Message {
+            tx,
+            address,
+            input: Box::new(message)
+        }).map_err(|e| Error::TokioSend(format!("hell channel error, {}", e)))?;
+
+        let any_output = rx.await.map_err(|s| Error::TokioSend(format!("{}", s)))??;
+
+        if let Ok(output) = any_output.downcast::<O>() {
+            Ok(*output)
+        } else {
+            Err(Error::WrongType)
+        }
+    }
+
+    /// Sends a message to a demon, and ignore the result.
+    ///
+    /// This is your go-to function when you don't have to wait for the actor to give you a response back.
     ///
     /// ```rust
     /// use apocalypse::{Hell, Demon};
@@ -65,13 +121,13 @@ impl Gate {
     ///     let location = gate.spawn(EchoDemon{}).await.unwrap();
     ///     // In order to prevent lock ups, we send this future to another task
     ///     tokio::spawn(async move {
-    ///         gate.send(&location, "Hallo, welt!").await;
+    ///         gate.send_and_ignore(&location, "Hallo, welt!").unwrap();
     ///     });
     ///     // We await the system
     ///     join_handle.await.unwrap();
     /// }
     /// ```
-    pub async fn send<D, I, O>(&self, location: &Location<D>, message: I) -> Result<O, Error> 
+    pub fn send_and_ignore<D, I, O>(&self, location: &Location<D>, message: I) -> Result<(), Error> 
         where 
             D: Demon<Input = I, Output = O>,
             I: 'static + Send,
@@ -85,16 +141,11 @@ impl Gate {
             address,
             input: Box::new(message)
         }).map_err(|e| Error::TokioSend(format!("hell channel error, {}", e)))?;
-        #[cfg(feature = "internal_log")]
-        log::debug!("Adding new message to the queue, for address {}", address);
 
-        let any_output = rx.await.map_err(|s| Error::TokioSend(format!("{}", s)))??;
-
-        if let Ok(output) = any_output.downcast::<O>() {
-            Ok(*output)
-        } else {
-            Err(Error::WrongType)
-        }
+        tokio::spawn(async move {
+            let _ = rx.await;
+        });
+        Ok(())
     }
 
     /// Spawns a demon in hell
@@ -154,11 +205,7 @@ impl Gate {
         }).map_err(|e| Error::TokioSend(format!("{}", e)))?;
 
         // If it returned true, then everything is ok
-        if rx.await.map_err(|s| Error::TokioSend(format!("{}", s)))? {
-            Ok(location)
-        } else {
-            panic!("Oh noes");
-        }
+        rx.await.map_err(|s| Error::TokioSend(format!("{}", s)))?.map(move |_| location)
     }
 
     /// Spawns a demon with websockets processing in hell
@@ -225,11 +272,7 @@ impl Gate {
         }).map_err(|e| Error::TokioSend(format!("{}", e)))?;
 
         // If it returned true, then everything is ok
-        if rx.await.map_err(|s| Error::TokioSend(format!("{}", s)))? {
-            Ok(location)
-        } else {
-            panic!("Oh noes");
-        }
+        rx.await.map_err(|s| Error::TokioSend(format!("{}", s)))?.map(move |_| location)
     }
 
     /// Get rid of one demon
@@ -268,7 +311,6 @@ impl Gate {
             address: location.address,
             tx
         }).map_err(|e| Error::TokioSend(format!("{}", e)))?;
-        rx.await.map_err(|e| Error::TokioSend(format!("{}", e)))?;
-        Ok(())
+        rx.await.map_err(|e| Error::TokioSend(format!("{}", e)))?
     }
 }

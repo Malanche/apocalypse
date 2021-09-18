@@ -25,3 +25,17 @@ impl<E> Hash for Location<E> {
         self.address.hash(state);
     }
 }
+
+impl<E> PartialEq for Location<E> {
+    fn eq(&self, other: &Self) -> bool {
+        self.address == other.address
+    }
+}
+
+impl<E> Eq for Location<E>{}
+
+impl<E> std::fmt::Display for Location<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        write!(formatter, "d-{}", self.address)
+    }
+}
