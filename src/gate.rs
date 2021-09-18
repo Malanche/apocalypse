@@ -53,7 +53,7 @@ impl Gate {
     ///     type Input = &'static str;
     ///     type Output = String;
     ///     async fn handle(&mut self, message: Self::Input) -> Self::Output {
-    ///         format!("{}", message);
+    ///         format!("{}", message)
     ///     }
     /// }
     ///
@@ -65,7 +65,7 @@ impl Gate {
     ///     let location = gate.spawn(EchoDemon{}).await.unwrap();
     ///     // In order to prevent lock ups, we send this future to another task
     ///     tokio::spawn(async move {
-    ///         println!(gate.send(&location, "Hallo, welt!").await.unwrap());
+    ///         println!("{}", gate.send(&location, "Hallo, welt!").await.unwrap());
     ///     });
     ///     // We await the system
     ///     join_handle.await.unwrap();
