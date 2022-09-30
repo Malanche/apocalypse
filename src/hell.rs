@@ -2,6 +2,7 @@ use std::collections::{HashMap};
 use crate::{Gate, Error};
 use tokio::{
     sync::{
+        oneshot::{self},
         mpsc::{self, UnboundedSender}
     },
     task::JoinHandle
@@ -70,32 +71,32 @@ impl Hell {
         let gate_clone = gate.clone();
 
         let jh = tokio::spawn(async move {
-            #[cfg(feature = "internal_log")]
-            log::info!("Hell starts to burn \u{1f525}");
-            loop {
+            #[cfg(feature = "full_log")]
+            log::info!("Broker starts \u{1f525}");
+            let clean = loop {
                 tokio::select! {
                     value = instructions.recv() => if let Some(instruction) = value {
                         match instruction {
                             HellInstruction::CreateAddress{tx} => {
                                 let current_counter = self.counter;
                                 if tx.send(current_counter).is_ok() {
-                                    #[cfg(feature = "internal_log")]
+                                    #[cfg(feature = "full_log")]
                                     log::debug!("[Hell] reserved address {}", current_counter);
                                     self.counter += 1;
                                 } else {
-                                    #[cfg(feature = "internal_log")]
+                                    #[cfg(feature = "full_log")]
                                     log::debug!("[Hell] failed to notify address {} reservation", current_counter);
                                 }
                             },
                             HellInstruction::RegisterDemon{address, channel, tx} => {
                                 let added = match self.demons.entry(address) {
                                     std::collections::hash_map::Entry::Occupied(_) => {
-                                        #[cfg(feature = "internal_log")]
+                                        #[cfg(feature = "full_log")]
                                         log::debug!("[Hell] demon address {} is already taken", address);
                                         Err(Error::OccupiedAddress)
                                     },
                                     std::collections::hash_map::Entry::Vacant(v) => {
-                                        #[cfg(feature = "internal_log")]
+                                        #[cfg(feature = "full_log")]
                                         log::debug!("[Hell] registering new demon with address {}", address);
                                         v.insert(channel);
                                         Ok(())
@@ -103,7 +104,7 @@ impl Hell {
                                 };
 
                                 if tx.send(added).is_err() {
-                                    #[cfg(feature = "internal_log")]
+                                    #[cfg(feature = "full_log")]
                                     log::debug!("[Hell] dangling demon with address {}, as it could not be notified that it was registered. removing.", address);
                                     self.demons.remove(&address);
                                 }
@@ -111,12 +112,12 @@ impl Hell {
                             HellInstruction::Message{tx, address, input} => {
                                 if let Some(demon) = self.demons.get_mut(&address) {
                                     if demon.send(MiniHellInstruction::Message(tx, input)).is_err() {
-                                        #[cfg(feature = "internal_log")]
+                                        #[cfg(feature = "full_log")]
                                         log::debug!("[Hell] message could not be delivered to demon {}", address);
                                     };
                                 } else {
                                     if tx.send(Err(Error::InvalidLocation)).is_err() {
-                                        #[cfg(feature = "internal_log")]
+                                        #[cfg(feature = "full_log")]
                                         log::debug!("[Hell] invalid location message for address {} could not be delivered back", address);
                                     };
                                 }
@@ -125,38 +126,69 @@ impl Hell {
                                 // We simply drop the channel, so the mini hell will close automatically
                                 let removed = self.demons.remove(&address);
                                 if let Some(channel) = removed {
-                                    if channel.send(MiniHellInstruction::Shutdown).is_err() {
-                                        #[cfg(feature = "internal_log")]
+                                    let (demon_tx, demon_rx) = oneshot::channel();
+                                    if channel.send(MiniHellInstruction::Shutdown(demon_tx)).is_err() {
+                                        #[cfg(feature = "full_log")]
                                         log::debug!("[Hell] could not notify demon thread the requested demon at address {} removal", address);
                                         if tx.send(Err(Error::DemonCommunication)).is_err() {
-                                            #[cfg(feature = "internal_log")]
+                                            #[cfg(feature = "full_log")]
                                             log::debug!("[Hell] could not notify demon at address {} removal failure", address);
                                         }
                                     } else {
+                                        // TODO, allow wait for demon removal
+                                        if true {
+                                            if demon_rx.await.is_err() {
+                                                #[cfg(feature = "full_log")]
+                                                log::debug!("[Hell] could not wait for demon to be vanquished, {}", address);
+                                            };
+                                        }
                                         if tx.send(Ok(())).is_err() {
-                                            #[cfg(feature = "internal_log")]
+                                            #[cfg(feature = "full_log")]
                                             log::debug!("[Hell] could not notify back demon at address {} removal", address);
                                         }
                                     }
                                 } else {
-                                    #[cfg(feature = "internal_log")]
+                                    #[cfg(feature = "full_log")]
                                     log::debug!("[Hell] demon with address {} was not found", address);
                                     if tx.send(Err(Error::InvalidLocation)).is_err() {
-                                        #[cfg(feature = "internal_log")]
+                                        #[cfg(feature = "full_log")]
                                         log::debug!("[Hell] could not notify that demon with address {} was not found", address);
                                     }
                                 }
+                            },
+                            HellInstruction::Extinguish{tx, wait} => {
+                                break Some((tx, wait));
                             }
                         }
                     } else {
-                        #[cfg(feature = "internal_log")]
+                        #[cfg(feature = "full_log")]
                         log::info!("[Hell] all gates to hell have been dropped");
-                        break;
+                        break None;
                     }
                 }
+            };
+
+            if let Some((tx, wait)) = clean {
+                for (_id, channel) in self.demons {
+                    let (tx, rx) = oneshot::channel();
+                    if channel.send(MiniHellInstruction::Shutdown(tx)).is_err() {
+                        #[cfg(feature = "full_log")]
+                        log::debug!("[Hell] could not notify demon thread the requested demon at address {} removal", _id);
+                    }
+                    if wait {
+                        if rx.await.is_err() {
+                            #[cfg(feature = "full_log")]
+                            log::debug!("[Hell] could not wait for demon to be vanquished, {}", _id);
+                        }
+                    }
+                }
+                if tx.send(()).is_err() {
+                    #[cfg(feature = "full_log")]
+                    log::debug!("[Hell] could not notify gate about extintion");
+                }
             }
-            #[cfg(feature = "internal_log")]
-            log::info!("[Hell] Hell goes cold \u{1f9ca}");
+            #[cfg(feature = "full_log")]
+            log::info!("Broker stops \u{1f9ca}");
         });
         Ok((gate_clone, jh))
     }

@@ -24,5 +24,9 @@ pub(crate) enum HellInstruction {
         tx: Sender<Result<Box<dyn Any + Send>, Error>>,
         address: usize,
         input: Box<dyn Any + Send>
+    },
+    Extinguish {
+        tx: Sender<()>,
+        wait: bool
     }
 }

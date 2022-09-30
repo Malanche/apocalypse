@@ -11,6 +11,12 @@ pub struct Location<E: ?Sized> {
     pub(crate) phantom: PhantomData<E>
 }
 
+impl<A> AsRef<Location<A>> for Location<A> {
+    fn as_ref(&self) -> &Location<A> {
+        &self
+    }
+}
+
 impl<E> Clone for Location<E> {
     fn clone(&self) -> Location<E> {
         Location {

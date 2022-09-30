@@ -2,7 +2,7 @@ use crate::{Error, Demon, Location, hell::{MiniHell, HellInstruction}};
 use tokio::sync::{mpsc::UnboundedSender, oneshot::{self}};
 use std::marker::PhantomData;
 #[cfg(feature = "ws")]
-use cataclysm_ws::{WebSocketReader};
+use cataclysm::ws::{WebSocketReader};
 #[cfg(feature = "ws")]
 use tokio::net::tcp::OwnedReadHalf;
 #[cfg(feature = "ws")]
@@ -17,7 +17,7 @@ use crate::hell::MiniWSHell;
 /// * There are messages still in the queue to be processed
 /// * There is at least one gate alive
 ///
-/// That is, dropping all gates finalize hell's execution. This structure cannot be created without the help of a [Hell](crate::Hell) instance.
+/// That is, dropping all gates finalizes hell's execution. Due to the fact that a gate is required to send messages, and some Demons will have a gate among their fields, you have to remove all Demons in posession of a Gate to shutdown Hell gracefully. This structure cannot be created without the help of a [Hell](crate::Hell) instance.
 pub struct Gate {
     /// Communication with main hell instance
     hell_channel: UnboundedSender<HellInstruction>
@@ -46,39 +46,33 @@ impl Gate {
     /// ```rust
     /// use apocalypse::{Hell, Demon};
     ///
-    /// struct EchoDemon{}
+    /// struct EchoBot;
     ///
     /// #[async_trait::async_trait]
-    /// impl Demon for EchoDemon {
+    /// impl Demon for EchoBot {
     ///     type Input = &'static str;
     ///     type Output = String;
     ///     async fn handle(&mut self, message: Self::Input) -> Self::Output {
-    ///         format!("{}", message)
+    ///         message.to_string()
     ///     }
     /// }
     ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let hell = Hell::new();
-    ///     let (gate, join_handle) = hell.fire().await.unwrap();
-    ///     // we spawn the demon
-    ///     let location = gate.spawn(EchoDemon{}).await.unwrap();
-    ///     // In order to prevent lock ups, we send this future to another task
-    ///     tokio::spawn(async move {
-    ///         println!("{}", gate.send(&location, "Hallo, welt!").await.unwrap());
-    ///     });
-    ///     // We await the system
-    ///     join_handle.await.unwrap();
-    /// }
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let (gate, jh) = Hell::new().fire().await.unwrap();
+    /// let location = gate.spawn(EchoBot).await.unwrap();
+    /// // Use the send function to send a message
+    /// let message = gate.send(&location, "Hallo, welt!").await.unwrap();
+    /// # }
     /// ```
-    pub async fn send<D, I, O>(&self, location: &Location<D>, message: I) -> Result<O, Error> 
+    pub async fn send<A: AsRef<Location<D>>, D, I, O>(&self, location: A, message: I) -> Result<O, Error> 
         where 
             D: Demon<Input = I, Output = O>,
             I: 'static + Send,
             O: 'static + Send {
         // async channel to get the response
         let (tx, rx) = oneshot::channel();
-        let address = location.address;
+        let address = location.as_ref().address;
         
         self.hell_channel.send(HellInstruction::Message {
             tx,
@@ -102,30 +96,24 @@ impl Gate {
     /// ```rust
     /// use apocalypse::{Hell, Demon};
     ///
-    /// struct EchoDemon{}
+    /// struct PrintBot;
     ///
     /// #[async_trait::async_trait]
-    /// impl Demon for EchoDemon {
+    /// impl Demon for PrintBot {
     ///     type Input = &'static str;
     ///     type Output = ();
-    ///     async fn handle(&mut self, message: Self::Input) -> Self::Output {
+    ///     async fn handle(&mut self, message: Self::Input) {
     ///         println!("{}", message);
     ///     }
     /// }
     ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let hell = Hell::new();
-    ///     let (gate, join_handle) = hell.fire().await.unwrap();
-    ///     // we spawn the demon
-    ///     let location = gate.spawn(EchoDemon{}).await.unwrap();
-    ///     // In order to prevent lock ups, we send this future to another task
-    ///     tokio::spawn(async move {
-    ///         gate.send_and_ignore(&location, "Hallo, welt!").unwrap();
-    ///     });
-    ///     // We await the system
-    ///     join_handle.await.unwrap();
-    /// }
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let (gate, jh) = Hell::new().fire().await.unwrap();
+    /// let location = gate.spawn(PrintBot).await.unwrap();
+    /// // Use the send and ignore function to send a message without waiting for it
+    /// gate.send_and_ignore(&location, "Hallo, welt!").unwrap();
+    /// # }
     /// ```
     pub fn send_and_ignore<D, I, O>(&self, location: &Location<D>, message: I) -> Result<(), Error> 
         where 
@@ -150,10 +138,10 @@ impl Gate {
 
     /// Spawns a demon in hell
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// use apocalypse::{Hell, Demon};
     ///
-    /// struct Basic{}
+    /// struct Basic;
     ///
     /// #[async_trait::async_trait]
     /// impl Demon for Basic {
@@ -164,17 +152,12 @@ impl Gate {
     ///     }
     /// }
     ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let hell = Hell::new();
-    ///     let (gate, join_handle) = hell.fire().await.unwrap();
-    ///     // we spawn the demon
-    ///     let _location = gate.spawn(Basic{}).await;
-    ///     // And do some other stuff
-    ///     // ...
-    ///     // We await the system
-    ///     join_handle.await.unwrap();
-    /// }
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let (gate, join_handle) = hell.new().fire().await.unwrap();
+    /// // we spawn the demon
+    /// let _location = gate.spawn(Basic).await.unwrap();
+    /// # }
     /// ```
     pub async fn spawn<D: 'static + Demon<Input = I, Output = O>, I: 'static + Send, O: 'static + Send>(&self, demon: D) -> Result<Location<D>, Error> {
         // First return channel, to get a valid address
@@ -214,10 +197,10 @@ impl Gate {
     /// use apocalypse::{Hell, Demon};
     /// use cataclysm_ws::{WebSocketReader, Message};
     ///
-    /// struct Basic{}
+    /// struct PrintBot;
     ///
     /// #[async_trait::async_trait]
-    /// impl Demon for Basic {
+    /// impl Demon for PrintBot {
     ///     type Input = ();
     ///     type Output = ();
     ///     async fn handle(&mut self, message: Self::Input) -> Self::Output {
@@ -226,9 +209,9 @@ impl Gate {
     /// }
     /// 
     /// #[async_trait::async_trait]
-    /// impl WebSocketReader for Basic {
+    /// impl WebSocketReader for PrintBot {
     ///     async fn on_message(&mut self, message: Message) {
-    ///         // ... do nothing
+    ///         // ... do something with the message
     ///     }
     /// }
     ///
@@ -353,6 +336,16 @@ impl Gate {
         tokio::spawn(async move{
             let _ = rx.await;
         });
+        Ok(())
+    }
+
+    /// Stops the broker
+    ///
+    /// If wait is true, the broker will wait for every single demon to finish the vanquished method
+    pub async fn extinguish(self, wait: bool) -> Result<(), Error>{
+        let (tx, rx) = oneshot::channel();
+        self.hell_channel.send(HellInstruction::Extinguish{tx, wait}).map_err(|e| Error::TokioSend(format!("{}", e)))?;
+        rx.await.map_err(|e| Error::TokioSend(format!("{}", e)))?;
         Ok(())
     }
 }

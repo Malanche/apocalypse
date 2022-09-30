@@ -3,10 +3,9 @@ use std::any::Any;
 
 use tokio::{
     sync::{oneshot::Sender, mpsc::{self, UnboundedSender, UnboundedReceiver}},
-    net::tcp::OwnedReadHalf,
-    io::AsyncReadExt,
+    net::tcp::OwnedReadHalf
 };
-use cataclysm_ws::{Frame, WebSocketReader, Error as WSError};
+use cataclysm::ws::{WebSocketReader, WebSocketThread};
 use bytes::{BytesMut};
 
 /// Structure that holds a single demon, and asynchronously deals with the messages that this demon receives.
@@ -22,7 +21,7 @@ pub(crate) struct MiniWSHell<D> {
 }
 
 impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output = O> + WebSocketReader> MiniWSHell<D> {
-    pub fn spawn(demon: D, location: Location<D>, read_stream: OwnedReadHalf) -> UnboundedSender<MiniHellInstruction> {
+    pub(crate) fn spawn(demon: D, location: Location<D>, read_stream: OwnedReadHalf) -> UnboundedSender<MiniHellInstruction> {
         let (mailbox, instructions) = mpsc::unbounded_channel();
         let mini_hell = MiniWSHell {
             demon,
@@ -37,7 +36,7 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
     }
 
     async fn fire(mut self) {
-        #[cfg(feature = "internal_log")]
+        #[cfg(feature = "full_log")]
         log::debug!("[{}] demon thread starting", self.demon.id());
         // Inner message passing
         let (mailbox, mut messages) = mpsc::unbounded_channel::<(Sender<Result<Box<dyn Any + Send>, Error>>, Box<dyn Any + Send>)>();
@@ -49,106 +48,91 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
         let other_loc = self.location.clone();
         self.demon.spawned(other_loc).await;
 
-        loop {
-            #[cfg(feature = "internal_log")]
-            log::debug!("[{}] start of await loop", self.demon.id());
+        let mut wst = WebSocketThread::new(self.read_stream);
+
+        let notify = loop {
             tokio::select! {
                 res = messages.recv() => if let Some((tx, input)) = res {
                     if let Ok(input) = input.downcast::<I>() {
-                        #[cfg(feature = "internal_log")]
-                        log::warn!("[{}] demon handle processing message...", self.demon.id());
+                        #[cfg(feature = "full_log")]
+                        log::debug!("[{}] demon ready to process message...", self.demon.id()); 
                         let output = self.demon.handle(*input).await;
+                        #[cfg(feature = "full_log")]
+                        log::debug!("[{}] demon processed message!", self.demon.id());
                         if tx.send(Ok(Box::new(output))).is_err() {
-                            #[cfg(feature = "internal_log")]
-                            log::warn!("[{}] demon handle result could not be delivered back", self.demon.id());   
+                            #[cfg(feature = "full_log")]
+                            log::error!("[{}] demon processed message could not be sent back", self.demon.id());  
                         }
                     } else {
                         if tx.send(Err(Error::WrongType)).is_err() {
-                            #[cfg(feature = "internal_log")]
-                            log::warn!("[{}] demon handle received a wrong type and the message could not be delivered back", self.demon.id());   
+                            #[cfg(feature = "full_log")]
+                            log::error!("[{}] somehow, demon received wrong message type", self.demon.id());   
                         }
                     }
                 } else {
-                    #[cfg(feature = "internal_log")]
-                    log::info!("[{}] all channels to this demon are now closed (impossible)", self.demon.id());
-                    break;
+                    #[cfg(feature = "full_log")]
+                    log::debug!("[{}] all incoming channels closed (impossible)", self.demon.id());
+                    break None;
                 },
-                bytes_read = self.read_stream.read_buf(&mut buf) => if 0 != bytes_read.unwrap() {
-                    let maybe_frame = match Frame::parse(&buf) {
-                        Ok(frame) => Some(frame),
-                        Err(WSError::Parse(_e)) => {
-                            #[cfg(feature = "internal_log")]
-                            log::debug!("{}, clearing buffer", _e);
-                            buf.clear();
-                            None
+                maybe_frame = wst.read_frame() => {
+                    match maybe_frame  {
+                        Ok(maybe_frame) => {
+                            if let Some(frame) = maybe_frame {
+                                // We got a correct message, we clear the buffer
+                                buf.clear();
+                                // And call the handler
+                                if frame.is_close() {
+                                    self.demon.on_close(true).await;
+                                    break None;
+                                } else if let Some(message) = frame.into() {
+                                    self.demon.on_message(message).await;
+                                }
+                            } else {
+                                // Closing the connection in a nice way
+                                self.demon.on_close(false).await;
+                                break None;
+                            }
                         },
-                        Err(WSError::Incomplete) => None,
                         Err(_e) => {
-                            #[cfg(feature = "internal_log")]
-                            log::debug!("[{}] error occured while parsing websockets frame, {}", self.demon.id(), _e);
-                            None
+                            #[cfg(feature = "full_log")]
+                            log::debug!("[{}] error at ws frame reading, {}", self.demon.id(), _e);
                         }
-                    };
-
-                    if let Some(frame) = maybe_frame {
-                        #[cfg(feature = "internal_log")]
-                        log::debug!("[{}] received complete websockets message, processing", self.demon.id());
-                        // We got a correct message, we clear the buffer
-                        buf.clear();
-                        // And call the handler
-                        if let Some(message) = frame.into_message() {
-                            self.demon.on_message(message).await;
-                        }
-                    } else {
-                        // More data needs to arrive to parse the message  properly
-                        continue;
-                    }
-                } else {
-                    // Closed connection!
-                    if buf.is_empty() {
-                        // Half-clean exit
-                        #[cfg(feature = "internal_log")]
-                        log::info!("[{}] ws connection dropped", self.demon.id());
-                        break;
-                    } else {
-                        // connection reset by peer! horrible connection
-                        #[cfg(feature = "internal_log")]
-                        log::debug!("[{}] connection reset by peer, with some data in the buffer", self.demon.id());
-                        break
                     }
                 },
                 res = self.instructions.recv() => match res {
                     Some(instruction) => match instruction {
-                        MiniHellInstruction::Shutdown => {
-                            #[cfg(feature = "internal_log")]
-                            log::info!("[{}] shutdown signal received", self.demon.id());
-                            break
+                        MiniHellInstruction::Shutdown(tx) => {
+                            #[cfg(feature = "full_log")]
+                            log::debug!("[{}] shutdown signal received", self.demon.id());
+                            break Some(tx);
                         },
                         MiniHellInstruction::Message(result_mailbox, message) => {
-                            #[cfg(feature = "internal_log")]
-                            log::debug!("[{}] received message, adding to the processing queue", self.demon.id());
+                            #[cfg(feature = "full_log")]
+                            log::debug!("[{}] received instruction, adding to the processing queue", self.demon.id());
                             if mailbox.send((result_mailbox, message)).is_err() {
-                                #[cfg(feature = "internal_log")]
+                                #[cfg(feature = "full_log")]
                                 log::warn!("[{}] impossible error happened, could not send back message to itself!", self.demon.id());   
                             }
                         }
                     },
                     None => {
-                        #[cfg(feature = "internal_log")]
+                        #[cfg(feature = "full_log")]
                         log::info!("[{}] all channels to this demon are now closed", self.demon.id());
-                        break;
+                        break None;
                     }
                 }
             }
-            #[cfg(feature = "internal_log")]
-            log::debug!("[{}] end of await loop", self.demon.id());
-        }
+        };
 
         // The same, in reverse order
-        self.demon.vanquished().await;
-        self.demon.on_close().await;
-
-        #[cfg(feature = "internal_log")]
+        self.demon.vanquished(self.location).await;
+        if let Some(vanquish_mailbox) = notify {
+            if vanquish_mailbox.send(()).is_err() {
+                #[cfg(feature = "full_log")]
+                log::warn!("[{}] could not notify back hell about shutdown!", self.demon.id());   
+            }
+        }
+        #[cfg(feature = "full_log")]
         log::debug!("[{}] demon thread finished", self.demon.id());
     }
 }
