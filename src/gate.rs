@@ -145,7 +145,7 @@ impl Gate {
     ///
     /// #[async_trait::async_trait]
     /// impl Demon for Basic {
-    ///     type Input = ();
+    ///     type Input = String;
     ///     type Output = ();
     ///     async fn handle(&mut self, message: Self::Input) -> Self::Output {
     ///         println!("Hello, world!");
@@ -154,9 +154,10 @@ impl Gate {
     ///
     /// # #[tokio::main]
     /// # async fn main() {
-    /// let (gate, join_handle) = hell.new().fire().await.unwrap();
+    /// let (gate, join_handle) = Hell::new().fire().await.unwrap();
     /// // we spawn the demon
     /// let _location = gate.spawn(Basic).await.unwrap();
+    /// // Do something
     /// # }
     /// ```
     pub async fn spawn<D: 'static + Demon<Input = I, Output = O>, I: 'static + Send, O: 'static + Send>(&self, demon: D) -> Result<Location<D>, Error> {
@@ -195,7 +196,7 @@ impl Gate {
     ///
     /// ```rust,no_run
     /// use apocalypse::{Hell, Demon};
-    /// use cataclysm_ws::{WebSocketReader, Message};
+    /// use cataclysm::ws::{WebSocketReader, Message};
     ///
     /// struct PrintBot;
     ///
