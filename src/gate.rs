@@ -2,9 +2,7 @@ use crate::{Error, Demon, Location, hell::{MiniHell, HellInstruction}};
 use tokio::sync::{mpsc::UnboundedSender, oneshot::{self}};
 use std::marker::PhantomData;
 #[cfg(feature = "ws")]
-use cataclysm::ws::{WebSocketReader};
-#[cfg(feature = "ws")]
-use tokio::net::tcp::OwnedReadHalf;
+use cataclysm::ws::{WebSocketThread, WebSocketReader};
 #[cfg(feature = "ws")]
 use crate::hell::MiniWSHell;
 
@@ -227,7 +225,7 @@ impl Gate {
     /// }
     /// ```
     #[cfg(feature = "ws")]
-    pub async fn spawn_ws<D: 'static + Demon<Input = I, Output = O> + WebSocketReader, I: 'static + Send, O: 'static + Send>(&self, demon: D, read_stream: OwnedReadHalf) -> Result<Location<D>, Error> {
+    pub async fn spawn_ws<D: 'static + Demon<Input = I, Output = O> + WebSocketThread, I: 'static + Send, O: 'static + Send>(&self, demon: D, wsr: WebSocketReader) -> Result<Location<D>, Error> {
         // First return channel, to get a valid address
         let (tx, rx) = oneshot::channel();
 
@@ -243,7 +241,7 @@ impl Gate {
         };
 
         // We spawn the demon in a mini hell instance
-        let channel = MiniWSHell::spawn(demon, location.clone(), read_stream);
+        let channel = MiniWSHell::spawn(demon, location.clone(), wsr);
 
         // Second return channel, for knowing if the registration was successful
         let (tx, rx) = oneshot::channel();

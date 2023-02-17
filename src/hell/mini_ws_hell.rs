@@ -2,11 +2,9 @@ use crate::{Error, Demon, Location, hell::MiniHellInstruction};
 use std::any::Any;
 
 use tokio::{
-    sync::{oneshot::Sender, mpsc::{self, UnboundedSender, UnboundedReceiver}},
-    net::tcp::OwnedReadHalf
+    sync::{oneshot::Sender, mpsc::{self, UnboundedSender, UnboundedReceiver}}
 };
 use cataclysm::ws::{WebSocketReader, WebSocketThread};
-use bytes::{BytesMut};
 
 /// Structure that holds a single demon, and asynchronously deals with the messages that this demon receives.
 pub(crate) struct MiniWSHell<D> {
@@ -17,17 +15,17 @@ pub(crate) struct MiniWSHell<D> {
     /// Channel where instructions are sent to the minihell
     instructions: UnboundedReceiver<MiniHellInstruction>,
     /// Read stream where ws messages arrive
-    read_stream: OwnedReadHalf
+    wsr: WebSocketReader
 }
 
-impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output = O> + WebSocketReader> MiniWSHell<D> {
-    pub(crate) fn spawn(demon: D, location: Location<D>, read_stream: OwnedReadHalf) -> UnboundedSender<MiniHellInstruction> {
+impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output = O> + WebSocketThread> MiniWSHell<D> {
+    pub(crate) fn spawn(demon: D, location: Location<D>, wsr: WebSocketReader) -> UnboundedSender<MiniHellInstruction> {
         let (mailbox, instructions) = mpsc::unbounded_channel();
         let mini_hell = MiniWSHell {
             demon,
             location,
             instructions,
-            read_stream
+            wsr
         };
         tokio::spawn(async move {
             mini_hell.fire().await;
@@ -40,15 +38,11 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
         log::debug!("[{}] demon thread starting", self.demon.id());
         // Inner message passing
         let (mailbox, mut messages) = mpsc::unbounded_channel::<(Sender<Result<Box<dyn Any + Send>, Error>>, Box<dyn Any + Send>)>();
-        // We prepare out websockets buffer
-        let mut buf = BytesMut::with_capacity(8 * 1024);
 
         // We call both opening callbacks, starting by the websockets one
         self.demon.on_open().await;
         let other_loc = self.location.clone();
         self.demon.spawned(other_loc).await;
-
-        let mut wst = WebSocketThread::new(self.read_stream);
 
         let notify = loop {
             tokio::select! {
@@ -74,29 +68,21 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
                     log::debug!("[{}] all incoming channels closed (impossible)", self.demon.id());
                     break None;
                 },
-                maybe_frame = wst.read_frame() => {
-                    match maybe_frame  {
-                        Ok(maybe_frame) => {
-                            if let Some(frame) = maybe_frame {
-                                // We got a correct message, we clear the buffer
-                                buf.clear();
-                                // And call the handler
-                                if frame.is_close() {
-                                    self.demon.on_close(true).await;
-                                    break None;
-                                } else if let Some(message) = frame.into() {
-                                    self.demon.on_message(message).await;
-                                }
-                            } else {
-                                // Closing the connection in a nice way
-                                self.demon.on_close(false).await;
-                                break None;
-                            }
-                        },
-                        Err(_e) => {
-                            #[cfg(feature = "full_log")]
-                            log::debug!("[{}] error at ws frame reading, {}", self.demon.id(), _e);
+                frame = self.wsr.try_read_frame() => match frame {
+                    Ok(frame) => {
+                        if frame.message.is_close() {
+                            self.demon.on_close(true).await;
+                            break None;
                         }
+
+                        self.demon.on_message(frame.message).await;
+                    },
+                    Err(_e) => {
+                        self.demon.on_close(false).await;
+                        #[cfg(feature = "full_log")]
+                        log::debug!("[{}] {}", self.demon.id(), _e);
+
+                        break None;
                     }
                 },
                 res = self.instructions.recv() => match res {
