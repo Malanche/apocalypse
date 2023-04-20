@@ -1,6 +1,6 @@
 [package]
 name = "apocalypse"
-version = "0.4.3"
+version = "0.4.4"
 license = "MIT"
 description = "Simple actor framework for Rust"
 repository = "https://github.com/Malanche/apocalypse.git"
