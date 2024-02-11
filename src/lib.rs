@@ -11,7 +11,6 @@
 //! }
 //! 
 //! // Demon implementation for the human
-//! #[async_trait::async_trait]
 //! impl Demon for Human {
 //!     type Input = String;
 //!     type Output = String;
@@ -29,7 +28,7 @@
 //! 
 //!     // We create hell for this
 //!     let hell = Hell::new();
-//!     let (portal, jh) = match hell.fire().await {
+//!     let (portal, jh) = match hell.ignite().await {
 //!         Ok(v) => v,
 //!         Err(e) => panic!("Could not light up hell, {}", e)
 //!     };
@@ -53,11 +52,9 @@
 //!     jh.await.unwrap();
 //! }
 //! ```
-//!
-//! As you can see, you will need to use [async_trait](https://docs.rs/async_trait) in order to implement the [Demon](crate::Demon) trait in your code.
 
 pub use self::demon::{Demon, Location};
-pub use self::hell::Hell;
+pub use self::hell::{Hell, HellBuilder};
 pub use self::gate::{Gate};
 pub use self::error::Error;
 

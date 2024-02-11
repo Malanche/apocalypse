@@ -1,94 +1,71 @@
-use self::misc::SimpleLogger;
+pub use self::misc::SimpleLogger;
 mod misc;
 
-use apocalypse::{Hell, Demon, Gate, Location};
+use apocalypse::{Hell, Demon};
 
 // Human demon that echoes a message with its name
-struct ReplaceBot;
+struct EchoBot {
+    id: usize
+}
 
-// Demon implementation for the replace bot
-#[async_trait::async_trait]
-impl Demon for ReplaceBot {
+// Demon implementation for the echobot
+impl Demon for EchoBot {
     type Input = String;
     type Output = String;
     async fn handle(&mut self, message: Self::Input) -> Self::Output {
-        message.replace("a", "e").replace("o", "e")
+        log::info!("Request for message {} received by replica number {}", message, self.id);
+        if self.id != 2 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        message
     }
-}
 
-// Human demon that echoes a message with its name
-struct EmphasisBot;
-
-// Demon implementation for the emphasis bot, which requires the location of the replace bot
-#[async_trait::async_trait]
-impl Demon for EmphasisBot {
-    type Input = String;
-    type Output = String;
-    async fn handle(&mut self, message: Self::Input) -> Self::Output {
-        message + "!!!"
+    #[cfg(feature = "full_log")]
+    fn id(&self) -> String {
+        format!("EchoBot-{}", self.id)
     }
-}
 
-// Human demon that echoes a message with its name
-struct NiceStringBot {
-    gate: Gate,
-    rb_location: Location<ReplaceBot>,
-    eb_location: Location<EmphasisBot>
-}
-
-impl NiceStringBot {
-    fn new(gate: Gate, rb_location: Location<ReplaceBot>, eb_location: Location<EmphasisBot>) -> NiceStringBot {
-        NiceStringBot{gate, rb_location, eb_location}
-    }
-}
-
-// Demon implementation for the emphasis bot, which requires the location of the replace bot
-#[async_trait::async_trait]
-impl Demon for NiceStringBot {
-    type Input = String;
-    type Output = String;
-    async fn handle(&mut self, message: Self::Input) -> Self::Output {
-        let replaced = self.gate.send(&self.rb_location, message).await.unwrap();
-        let emphasized = self.gate.send(&self.eb_location, replaced).await.unwrap();
-        emphasized
+    #[cfg(feature = "full_log")]
+    fn multiple_id() -> &'static str {
+        "MultipleEchoBot"
     }
 }
 
 #[tokio::main]
 async fn main() {
     SimpleLogger::new().with_level(log::LevelFilter::Debug).init().unwrap();
+    // We create one demon
+    let mut counter = 0;
+    let echo_bot_factory = || {
+        let id = counter;
+        counter += 1;
+        EchoBot {
+            id
+        }
+    };
+
     // We create a hell for this
     let hell = Hell::new();
-    let (gate, jh) = match hell.fire().await {
+    let (gate, jh) = match hell.ignite().await {
         Ok(v) => v,
         Err(e) => panic!("Could not light up hell, {}", e)
     };
     
     // We spawn the demon in the running hell through the gate
-    let rb_location = match gate.spawn(ReplaceBot).await {
-        Ok(v) => v,
-        Err(e) => panic!("Could not spawn the demon, {}", e)
-    };
-
-    // We spawn the demon in the running hell through the gate
-    let eb_location = match gate.spawn(EmphasisBot).await {
-        Ok(v) => v,
-        Err(e) => panic!("Could not spawn the demon, {}", e)
-    };
-
-    // We spawn the demon in the running hell through the gate
-    let nsb_location = match gate.spawn(NiceStringBot::new(gate.clone(), rb_location, eb_location)).await {
+    let location = match gate.spawn_multiple(echo_bot_factory, 3).await {
         Ok(v) => v,
         Err(e) => panic!("Could not spawn the demon, {}", e)
     };
 
     tokio::spawn(async move {
-        let m1 = gate.send(&nsb_location, "hello world".to_string()).await.unwrap();
-        // And check that it is correct
-        log::info!("Received chain {}", m1);
-        assert_eq!("helle werld!!!", &m1);
-        // And we kill the emphasis bot to vanquish all gates
-        gate.vanquish_and_ignore(&nsb_location).unwrap();
+        let (_, _, _, _, _, _) = tokio::join!(
+            gate.send(&location, "hello world 1".to_string()),
+            gate.send(&location, "hello world 2".to_string()),
+            gate.send(&location, "hello world 3".to_string()),
+            gate.send(&location, "hello world 4".to_string()),
+            gate.send(&location, "hello world 5".to_string()),
+            gate.send(&location, "hello world 6".to_string())
+        );
     });
 
     // We wait for all messages to be processed.

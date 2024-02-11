@@ -7,7 +7,6 @@ use apocalypse::{Hell, Demon};
 struct EchoBot;
 
 // Demon implementation for the echobot
-#[async_trait::async_trait]
 impl Demon for EchoBot {
     type Input = String;
     type Output = String;
@@ -24,7 +23,7 @@ async fn main() {
 
     // We create a hell for this
     let hell = Hell::new();
-    let (gate, jh) = match hell.fire().await {
+    let (gate, jh) = match hell.ignite().await {
         Ok(v) => v,
         Err(e) => panic!("Could not light up hell, {}", e)
     };

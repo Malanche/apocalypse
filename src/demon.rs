@@ -1,11 +1,11 @@
+use std::future::Future;
 pub use self::location::Location;
 mod location;
 
 /// Demon trait
 ///
 /// Demons are actors in the apocalypse framework. Implement this trait in your actors to allow them to reply to messages.
-#[async_trait::async_trait]
-pub trait Demon: std::marker::Send {
+pub trait Demon: Sized + std::marker::Send + 'static{
     type Input;
     type Output;
 
@@ -18,7 +18,6 @@ pub trait Demon: std::marker::Send {
     ///
     /// struct EchoBot;
     ///
-    /// #[async_trait::async_trait]
     /// impl Demon for EchoBot {
     ///     type Input = String;
     ///     type Output = String;
@@ -34,8 +33,8 @@ pub trait Demon: std::marker::Send {
     ///     }
     /// }
     /// ```
-    async fn spawned(&mut self, _location: Location<Self>) {
-        ()
+    fn spawned(&mut self, _location: Location<Self>) -> impl Future<Output = ()> + Send {
+        async {}
     }
 
     /// Handler function for messages
@@ -47,7 +46,6 @@ pub trait Demon: std::marker::Send {
     ///
     /// struct EchoBot;
     ///
-    /// #[async_trait::async_trait]
     /// impl Demon for EchoBot {
     ///     type Input = String;
     ///     type Output = String;
@@ -58,7 +56,7 @@ pub trait Demon: std::marker::Send {
     ///     }
     /// }
     /// ```
-    async fn handle(&mut self, message: Self::Input) -> Self::Output;
+    fn handle(&mut self, message: Self::Input) -> impl Future<Output = Self::Output> + Send;
 
     /// Function that is called when a demon is removed
     ///
@@ -69,7 +67,6 @@ pub trait Demon: std::marker::Send {
     ///
     /// struct EchoBot;
     ///
-    /// #[async_trait::async_trait]
     /// impl Demon for EchoBot {
     ///     type Input = String;
     ///     type Output = String;
@@ -80,13 +77,13 @@ pub trait Demon: std::marker::Send {
     ///     }
     ///
     ///     // Callback function 
-    ///     async fn vanquished(&mut self, location: Location<Self>) {
-    ///         log::debug!("Killed echo bot with location {}", location);
+    ///     async fn vanquished(self) {
+    ///         log::debug!("Killed echo bot");
     ///     }
     /// }
     /// ```
-    async fn vanquished(&mut self, _location: Location<Self>) {
-        ()
+    fn vanquished(self) -> impl Future<Output = ()> + Send {
+        async {}
     }
 
     /// This id will be printed in the debug logs of the demon's thread.
@@ -95,5 +92,13 @@ pub trait Demon: std::marker::Send {
     #[cfg(feature = "full_log")]
     fn id(&self) -> String {
         "".to_string()
+    }
+
+    /// This id will be printed in the debug logs of the demon's thread, in case the [spawn_multiple](crate::Gate::spawn_multiple) function is used.
+    ///
+    /// It is useful when some lockup is happening and you have trouble to find it.
+    #[cfg(feature = "full_log")]
+    fn multiple_id() -> &'static str {
+        ""
     }
 }

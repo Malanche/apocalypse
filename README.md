@@ -15,7 +15,6 @@ struct Human {
 }
 
 // Demon implementation for the human
-#[async_trait::async_trait]
 impl Demon for Human {
     type Input = String;
     type Output = String;

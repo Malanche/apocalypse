@@ -5,7 +5,6 @@ use apocalypse::{Hell, Demon};
 struct Human {}
 
 // Demon implementation for the human
-#[async_trait::async_trait]
 impl Demon for Human {
     type Input = ();
     type Output = ();

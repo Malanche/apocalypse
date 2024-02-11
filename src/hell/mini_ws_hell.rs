@@ -1,8 +1,8 @@
-use crate::{Error, Demon, Location, hell::MiniHellInstruction};
+use crate::{Error, Demon, Location, hell::{MiniHellInstruction, DemonChannels}};
 use std::any::Any;
 
 use tokio::{
-    sync::{oneshot::Sender, mpsc::{self, UnboundedSender, UnboundedReceiver}}
+    sync::{oneshot::Sender, mpsc::{self, UnboundedReceiver}}
 };
 use cataclysm::ws::{WebSocketReader, WebSocketThread};
 
@@ -14,23 +14,34 @@ pub(crate) struct MiniWSHell<D> {
     location: Location<D>,
     /// Channel where instructions are sent to the minihell
     instructions: UnboundedReceiver<MiniHellInstruction>,
+    /// Killswitch endpoint
+    killswitch: UnboundedReceiver<Sender<()>>,
     /// Read stream where ws messages arrive
     wsr: WebSocketReader
 }
 
 impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output = O> + WebSocketThread> MiniWSHell<D> {
-    pub(crate) fn spawn(demon: D, location: Location<D>, wsr: WebSocketReader) -> UnboundedSender<MiniHellInstruction> {
+    pub(crate) fn spawn(demon: D, location: Location<D>, wsr: WebSocketReader) -> DemonChannels {
+        // Main instruction channel
         let (mailbox, instructions) = mpsc::unbounded_channel();
+        // Killswitch channel
+        let (killswitch_tx, killswitch) = mpsc::unbounded_channel();
+
         let mini_hell = MiniWSHell {
             demon,
             location,
             instructions,
+            killswitch,
             wsr
         };
         tokio::spawn(async move {
             mini_hell.fire().await;
         });
-        mailbox
+
+        DemonChannels {
+            instructions: mailbox,
+            killswitch: killswitch_tx
+        }
     }
 
     async fn fire(mut self) {
@@ -40,17 +51,46 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
         let (mailbox, mut messages) = mpsc::unbounded_channel::<(Sender<Result<Box<dyn Any + Send>, Error>>, Box<dyn Any + Send>)>();
 
         // We call both opening callbacks, starting by the websockets one
+        #[cfg(feature = "full_log")]
+        log::debug!("[{}] calling on_open function", self.demon.id());
         self.demon.on_open().await;
+        #[cfg(feature = "full_log")]
+        log::debug!("[{}] on_open function called", self.demon.id());
+
         let other_loc = self.location.clone();
+        #[cfg(feature = "full_log")]
+        log::debug!("[{}] calling spawn function", self.demon.id());
         self.demon.spawned(other_loc).await;
+        #[cfg(feature = "full_log")]
+        log::debug!("[{}] spawn function called", self.demon.id());
 
         let notify = loop {
             tokio::select! {
+                res = self.killswitch.recv() => if let Some(vanquish_mailbox) = res {
+                    #[cfg(feature = "full_log")]
+                    log::debug!("[{}] killswitch message received, forced demon shutdown", self.demon.id());
+                    break Some(vanquish_mailbox);
+                } else {
+                    #[cfg(feature = "full_log")]
+                    log::debug!("[{}] all incoming killswitch channels closed (impossible)", self.demon.id());
+                    break None;
+                },
                 res = messages.recv() => if let Some((tx, input)) = res {
                     if let Ok(input) = input.downcast::<I>() {
                         #[cfg(feature = "full_log")]
                         log::debug!("[{}] demon ready to process message...", self.demon.id()); 
-                        let output = self.demon.handle(*input).await;
+                        let output = tokio::select!{
+                            output = self.demon.handle(*input) => output,
+                            res = self.killswitch.recv() => if let Some(vanquish_mailbox) = res {
+                                #[cfg(feature = "full_log")]
+                                log::debug!("[{}] killswitch signal received, aborting current handle execution!", self.demon.id());
+                                break Some(vanquish_mailbox);
+                            } else {
+                                #[cfg(feature = "full_log")]
+                                log::debug!("[{}] all incoming killswitch channels closed (impossible), aborting current handle execution", self.demon.id());
+                                break None;
+                            }
+                        };
                         #[cfg(feature = "full_log")]
                         log::debug!("[{}] demon processed message!", self.demon.id());
                         if tx.send(Ok(Box::new(output))).is_err() {
@@ -110,15 +150,21 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
             }
         };
 
-        // The same, in reverse order
-        self.demon.vanquished(self.location).await;
+        #[cfg(feature = "full_log")]
+        let demon_id = self.demon.id();
+
+        // We call the vanquished function from this demon
+        #[cfg(feature = "full_log")]
+        log::debug!("[{}] calling vanquish function", demon_id);
+        self.demon.vanquished().await;
+        #[cfg(feature = "full_log")]
+        log::debug!("[{}] vanquish function called", demon_id);
+
         if let Some(vanquish_mailbox) = notify {
             if vanquish_mailbox.send(()).is_err() {
                 #[cfg(feature = "full_log")]
-                log::warn!("[{}] could not notify back hell about shutdown!", self.demon.id());   
+                log::warn!("[{}] could not notify back hell about shutdown!", demon_id);   
             }
         }
-        #[cfg(feature = "full_log")]
-        log::debug!("[{}] demon thread finished", self.demon.id());
     }
 }
