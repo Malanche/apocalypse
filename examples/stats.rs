@@ -8,15 +8,14 @@ struct EchoBot;
 
 // Demon implementation for the echobot
 impl Demon for EchoBot {
-    type Input = (String, std::time::Duration);
+    type Input = String;
     type Output = String;
+
     async fn handle(&mut self, message: Self::Input) -> Self::Output {
-        // handle function waits before replying
-        log::info!("actor -> waiting to reply");
-        tokio::time::sleep(message.1).await;
-        // Will not be reached this time
-        log::info!("actor -> replying");
-        message.0
+        log::info!("Received request");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        log::info!("Replying");
+        message
     }
 }
 
@@ -39,27 +38,24 @@ async fn main() {
             Ok(v) => v,
             Err(e) => panic!("Could not spawn the demon, {}", e)
         };
-    
-        let location_clone = location.clone();
+
         let gate_clone = gate.clone();
     
         tokio::spawn(async move {
-            log::info!("Sending message");
-            match gate_clone.send(&location_clone,("hello world".to_string(), std::time::Duration::from_secs(3))).await {
-                Ok(reply) => log::info!("reply: {}", reply),
-                Err(e) => log::error!("expected recv error, {}", e)
-            };
+            let m1 = gate_clone.send(&location, "hello world".to_string()).await.unwrap();
+            // And check that it is correct
+            assert_eq!("hello world", &m1);
         });
-    
-        // Force demon vanquish
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let _ = gate.vanquish_and_ignore_with_timeout(&location, Some(std::time::Duration::from_secs(1)));
-        
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let stats = gate.stats().await.unwrap();
+
+        log::info!("stats: {:?}", stats);
+
         jh
     };
 
-    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-
-    // We wait for all messages to be processed, should be immediate.
+    // We wait for all messages to be processed.
     jh.await.unwrap();
 }

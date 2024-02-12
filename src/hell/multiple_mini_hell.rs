@@ -1,12 +1,12 @@
 use crate::{Error, Demon, Location, hell::{MiniHellInstruction, DemonChannels}};
 use std::any::Any;
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
 use tokio::sync::{oneshot::{Sender}, mpsc::{self, UnboundedReceiver}};
 
 /// Structure that holds a single demon, and asynchronously deals with the messages that this demon receives.
 pub(crate) struct MultipleMiniHell<D> {
     /// Demon contained inside this minihell instance
-    demons: VecDeque<D>,
+    demons: VecDeque<(usize, D)>,
     /// Address of this demon
     location: Location<D>,
     /// Channel where instructions are sent to the minihell
@@ -22,7 +22,7 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
         // Killswitch channel
         let (killswitch_tx, killswitch) = mpsc::unbounded_channel();
 
-        let demons: VecDeque<D> = (0..replicas).map(|_| demon_factory()).collect();
+        let demons: VecDeque<(usize, D)> = (0..replicas).map(|idx| (idx, demon_factory())).collect();
 
         let multiple_mini_hell = MultipleMiniHell {
             demons,
@@ -32,7 +32,7 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
         };
 
         tokio::spawn(async move {
-            multiple_mini_hell.fire().await;
+            multiple_mini_hell.ignite().await;
         });
 
         Ok(DemonChannels {
@@ -41,20 +41,22 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
         })
     }
 
-    async fn fire(mut self) {
+    async fn ignite(mut self) {
         #[cfg(feature = "full_log")]
         log::debug!("[{}] multiple demon thread starting", <D as Demon>::multiple_id());
         let (mailbox, mut messages) = mpsc::unbounded_channel::<(Sender<Result<Box<dyn Any + Send>, Error>>, Box<dyn Any + Send>)>();
 
         // Answers channel
-        let (answers_tx, mut answers) = mpsc::unbounded_channel::<D>();
+        let (answers_tx, mut answers) = mpsc::unbounded_channel::<(usize, D)>();
         let mut requests: VecDeque<(
             Sender<Result<Box<dyn Any + Send>, Error>>,
             I
         )> = VecDeque::new();
 
+        let mut handles: HashMap<usize, tokio::task::JoinHandle<()>> = HashMap::new();
+
         // We call the spawned function from this demon
-        for demon in &mut self.demons {
+        for (_, demon) in &mut self.demons {
             #[cfg(feature = "full_log")]
             log::debug!("[{}] calling spawn function", demon.id());
             demon.spawned(self.location.clone()).await;
@@ -64,11 +66,11 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
 
         let notify = loop {
             tokio::select! {
-                answer = answers.recv() => if let Some(mut demon) = answer {
+                answer = answers.recv() => if let Some((idx, mut demon)) = answer {
                     // if we have pending requests, we pop them here
                     if let Some((tx, request)) = requests.pop_front() {
                         let answers_tx_clone = answers_tx.clone();
-                        tokio::spawn(async move {
+                        handles.insert(idx, tokio::spawn(async move {
                             #[cfg(feature = "full_log")]
                             log::debug!("[{}] calling handle function", demon.id());
                             let output = demon.handle(request).await;
@@ -84,13 +86,14 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
                             // Now the demon back
                             #[cfg(feature = "full_log")]
                             let demon_id = demon.id();
-                            if answers_tx_clone.send(demon).is_err() {
+                            if answers_tx_clone.send((idx, demon)).is_err() {
                                 #[cfg(feature = "full_log")]
                                 log::error!("[{}] demon could not be sent back", demon_id);
                             }
-                        });
+                        }));
                     } else {
-                        self.demons.push_back(demon);
+                        handles.remove(&idx);
+                        self.demons.push_back((idx, demon));
                     }
                 } else {
                     #[cfg(feature = "full_log")]
@@ -99,7 +102,10 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
                 },
                 res = self.killswitch.recv() => if let Some(vanquish_mailbox) = res {
                     #[cfg(feature = "full_log")]
-                    log::debug!("[{}] killswitch message received, forced demon shutdown", <D as Demon>::multiple_id());
+                    log::debug!("[{}] killswitch message received, forced demon shutdown (aborting {} pending tasks)", <D as Demon>::multiple_id(), handles.len());
+                    for handle in handles.into_iter().map(|v| v.1) {
+                        handle.abort()
+                    }
                     break Some(vanquish_mailbox);
                 } else {
                     #[cfg(feature = "full_log")]
@@ -108,12 +114,12 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
                 },
                 res = messages.recv() => if let Some((tx, input)) = res {
                     if let Ok(input) = input.downcast::<I>() {
-                        if let Some(mut demon) = self.demons.pop_front() {
+                        if let Some((idx, mut demon)) = self.demons.pop_front() {
                             #[cfg(feature = "full_log")]
                             log::debug!("[{}] available demon, sending to thread to process message. remaining demons: {}", demon.id(), self.demons.len());
                             // We move the demon to a thread
                             let answers_tx_clone = answers_tx.clone();
-                            tokio::spawn(async move {
+                            handles.insert(idx.clone(), tokio::spawn(async move {
                                 #[cfg(feature = "full_log")]
                                 log::debug!("[{}] calling handle function", demon.id());
                                 let output = demon.handle(*input).await;
@@ -129,11 +135,11 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
                                 // Now the demon back
                                 #[cfg(feature = "full_log")]
                                 let demon_id = demon.id();
-                                if answers_tx_clone.send(demon).is_err() {
+                                if answers_tx_clone.send((idx, demon)).is_err() {
                                     #[cfg(feature = "full_log")]
                                     log::error!("[{}] demon could not be sent back for reuse", demon_id);
                                 }
-                            });
+                            }));
                         } else {
                             #[cfg(feature = "full_log")]
                             log::debug!("[{}] all demons are busy, puting message in inner queue. Total pending messages: {}", <D as Demon>::multiple_id(), requests.len() + 1);
@@ -176,7 +182,7 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
         };
 
         // We call the vanquished function from this demon
-        for demon in self.demons {
+        for (_, demon) in self.demons {
             #[cfg(feature = "full_log")]
             let demon_id = demon.id();
             #[cfg(feature = "full_log")]

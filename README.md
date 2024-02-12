@@ -32,27 +32,31 @@ async fn main() {
 
     // We create a hell for this
     let hell = Hell::new();
-    let (gate, jh) = match hell.fire().await {
-        Ok(v) => v,
-        Err(e) => panic!("Could not light up hell, {}", e)
-    };
+    let join_handle = {
+        let (gate, jh) = match hell.ignite().await {
+            Ok(v) => v,
+            Err(e) => panic!("Could not light up hell, {}", e)
+        };
+        
+        // We spawn the demon in the running hell through the gate
+        let location = match gate.spawn(carlos).await {
+            Ok(v) => v,
+            Err(e) => panic!("Could not spawn the demon, {}", e)
+        };
     
-    // We spawn the demon in the running hell through the gate
-    let location = match gate.spawn(carlos).await {
-        Ok(v) => v,
-        Err(e) => panic!("Could not spawn the demon, {}", e)
-    };
+        tokio::spawn(async move {
+            let m1 = gate.send(&location, "hello world".to_string()).await.unwrap();
+            // We print the message just for show
+            println!("{}", &m1);
+            // And check that it is correct
+            assert_eq!("Hey, Carlos here: hello world", &m1);
+        });
 
-    tokio::spawn(async move {
-        let m1 = gate.send(&location, "hello world".to_string()).await.unwrap();
-        // We print the message just for show
-        println!("{}", &m1);
-        // And check that it is correct
-        assert_eq!("Hey, Carlos here: hello world", &m1);
-    });
+        jh
+    };
 
     // We wait for all messages to be processed.
-    jh.await.unwrap();
+    join_handle.await.unwrap();
 }
 ```
 

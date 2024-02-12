@@ -35,7 +35,7 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
             wsr
         };
         tokio::spawn(async move {
-            mini_hell.fire().await;
+            mini_hell.ignite().await;
         });
 
         DemonChannels {
@@ -44,7 +44,7 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
         }
     }
 
-    async fn fire(mut self) {
+    async fn ignite(mut self) {
         #[cfg(feature = "full_log")]
         log::debug!("[{}] demon thread starting", self.demon.id());
         // Inner message passing
@@ -78,9 +78,13 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
                 res = messages.recv() => if let Some((tx, input)) = res {
                     if let Ok(input) = input.downcast::<I>() {
                         #[cfg(feature = "full_log")]
-                        log::debug!("[{}] demon ready to process message...", self.demon.id()); 
+                        log::debug!("[{}] calling handle function", self.demon.id());
                         let output = tokio::select!{
-                            output = self.demon.handle(*input) => output,
+                            output = self.demon.handle(*input) => {
+                                #[cfg(feature = "full_log")]
+                                log::debug!("[{}] handle function called", self.demon.id());
+                                output
+                            },
                             res = self.killswitch.recv() => if let Some(vanquish_mailbox) = res {
                                 #[cfg(feature = "full_log")]
                                 log::debug!("[{}] killswitch signal received, aborting current handle execution!", self.demon.id());

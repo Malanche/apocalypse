@@ -33,29 +33,58 @@ mod hell_instruction;
 pub(crate) use self::mini_hell_instruction::{MiniHellInstruction};
 mod mini_hell_instruction;
 
+/// Builder helper for a Hell instance
 pub struct HellBuilder {
-    /// timeout before shutdown of a demon
+    /// Timeout before shutdown of a demon
     timeout: Option<Duration>
 }
 
 impl HellBuilder {
     /// Generates a new instance of a hell builder
+    ///
+    /// ```rust
+    /// # use apocalypse::{HellBuilder};
+    /// # fn main() {
+    /// let hell = HellBuilder::new();
+    /// // Change params of the hell instance
+    /// # }
+    /// ```
     pub fn new() -> HellBuilder {
         HellBuilder {
             timeout: None
         }
     }
 
+    /// Sets a timeout for the vanquish method to be executed
+    ///
+    /// ```rust
+    /// use apocalypse::{HellBuilder};
+    /// use std::time::Duration;
+    ///
+    /// # fn main() {
+    /// let hell = HellBuilder::new().timeout(Duration::from_secs(5));
+    /// // further modify this hell instance
+    /// # }
+    /// ```
     pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
         self.timeout = Some(timeout);
         self
     }
 
-    /// Generates a hell instance
+    /// Generates the hell instance from the builder params
+    ///
+    /// ```rust
+    /// # use apocalypse::{HellBuilder};
+    /// # fn main() {
+    /// let hell = HellBuilder::new().build();
+    /// # }
+    /// ```
     pub fn build(self) -> Hell {
         Hell {
             counter: 0,
             zombie_counter: 0,
+            successful_messages: 0,
+            failed_messages: 0,
             demons: HashMap::new(),
             timeout: self.timeout,
             ignition_time: Utc::now()
@@ -69,6 +98,10 @@ impl HellBuilder {
 pub struct Hell {
     /// Demon counter, to asign a unique address to each demon
     counter: usize,
+    /// Amount of messages delivered to demons
+    successful_messages: usize,
+    /// Amount of messages delivered to demons
+    failed_messages: usize,
     /// Zombie counter
     zombie_counter: usize,
     /// Communication channels with demons.
@@ -93,6 +126,8 @@ impl Hell {
         Hell {
             counter: 0,
             zombie_counter: 0,
+            successful_messages: 0,
+            failed_messages: 0,
             demons: HashMap::new(),
             timeout: None,
             ignition_time: Utc::now()
@@ -183,8 +218,11 @@ impl Hell {
                             HellInstruction::Message{tx, address, input} => {
                                 if let Some(demon_channels) = self.demons.get_mut(&address) {
                                     if demon_channels.instructions.send(MiniHellInstruction::Message(tx, input)).is_err() {
+                                        self.failed_messages += 1;
                                         #[cfg(feature = "full_log")]
                                         log::debug!("[Hell] message could not be delivered to demon {}", address);
+                                    } else {
+                                        self.successful_messages += 1;
                                     };
                                 } else {
                                     if tx.send(Err(Error::InvalidLocation)).is_err() {
@@ -201,7 +239,13 @@ impl Hell {
                                     let (demon_tx, demon_rx) = oneshot::channel();
                                     let (killswitch_tx, killswitch) = oneshot::channel();
 
-                                    if let Some(timeout) = self.timeout.or(force) {
+                                    // force timeout has the prefference
+                                    let timeout = match force {
+                                        Some(v) => v,
+                                        None => self.timeout
+                                    };
+
+                                    if let Some(timeout) = timeout {
                                         #[cfg(feature = "full_log")]
                                         log::debug!("[Hell] killswitch trigger requested in {}ms", timeout.as_millis());
                                         // We send the killswitch with a timeout
@@ -211,6 +255,9 @@ impl Hell {
                                             // We ignore the killswitch send, because maybe the demon_channel is already obsolete
                                             let _ = demon_channel_killswitch.send(killswitch_tx);
                                         });
+                                    } else {
+                                        #[cfg(feature = "full_log")]
+                                        log::debug!("[Hell] no timeout was set for this vanquish call");
                                     }
 
                                     if demon_channels.instructions.send(MiniHellInstruction::Shutdown(demon_tx)).is_err() {
@@ -240,7 +287,7 @@ impl Hell {
                                                         log::debug!("[Hell] could not wait for demon to be killswitch vanquished, {}", _address_copy);
                                                     } else {
                                                         #[cfg(feature = "full_log")]
-                                                        log::debug!("[Hell] killswitch vanquish, {}", _address_copy);
+                                                        log::debug!("[Hell] killswitch vanquish requested, sending to address {}", _address_copy);
                                                     }
                                                 }
                                             };
@@ -276,8 +323,11 @@ impl Hell {
                             },
                             HellInstruction::Stats{tx} => {
                                 if tx.send(HellStats {
+                                    spawned_demons: self.counter,
                                     active_demons: self.demons.len(),
                                     zombie_demons: 0,
+                                    successful_messages: self.successful_messages,
+                                    failed_messages: self.failed_messages,
                                     ignition_time: self.ignition_time.clone()
                                 }).is_err() {
                                     #[cfg(feature = "full_log")]

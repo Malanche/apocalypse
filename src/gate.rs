@@ -188,7 +188,9 @@ impl Gate {
         rx.await.map_err(|s| Error::TokioSend(format!("{}", s)))?.map(move |_| location)
     }
 
-    /// Spawns a demon in hell
+    /// Spawns multiple demons in Hell, that reply to the same [Location](Location)
+    ///
+    /// This might be useful if you have one task that consumes some time to be processed, and you can also parallelize. The load balancing method is just using whichever Demon is free at the moment, in a sequential order (that is, sequential but skipping if one is busy).
     ///
     /// ```rust
     /// use apocalypse::{Hell, Demon};
@@ -206,11 +208,11 @@ impl Gate {
     /// # #[tokio::main]
     /// # async fn main() {
     /// let (gate, join_handle) = Hell::new().ignite().await.unwrap();
-    /// // Spawn factory
+    /// // Demon factory, needs to implement FnMut
     /// let basic_factory = || {
     ///     Basic
     /// };
-    /// // we spawn the demon
+    /// // We spawn three instances of the demon
     /// let _location = gate.spawn_multiple(basic_factory, 3).await.unwrap();
     /// // Do something
     /// # }
@@ -249,6 +251,8 @@ impl Gate {
 
     /// Spawns a demon with websockets processing in hell
     ///
+    /// Demons spawned with this method need to implement the WebSocketThread trait. Demons will process both messages incoming from apocalypse, as well as from the websockets connection. It is important to note that the websockets handshake is not at all performed by this library.
+    ///
     /// ```rust,no_run
     /// use apocalypse::{Hell, Demon};
     /// use cataclysm::ws::{WebSocketThread, Message};
@@ -277,8 +281,7 @@ impl Gate {
     ///     let hell = Hell::new();
     ///     let (gate, join_handle) = hell.ignite().await.unwrap();
     ///     // In order to spawn, you should be able to obtain a
-    ///     // OwnedHalfRead tcp stream from tokio, which is already 
-    ///     // past the handshake protocol
+    ///     // OwnedHalfRead tcp stream from tokio or similar
     ///     // -> let _location = gate.spawn_ws(Basic{}, read_stream).await;
     /// }
     /// ```
@@ -317,9 +320,11 @@ impl Gate {
 
     /// Get rid of one demon gracefully
     ///
-    /// With this method, you request one demon to be dropped. Notice that locations will not automatically reflect this change, and further messages sent to the dropped demon will return `Error::InvalidLocation`.
+    /// With this method, you request one demon to be dropped. Notice that locations will not automatically reflect this change, and further messages sent to the dropped demon will return `Error::InvalidLocation`. This method with block until the demon confirms is no longer executing anything. There is no guarantee that all pending messages will be processed before termination.
+    /// 
+    /// If the hell instance has a default `timeout` for vanquishing demons, this function will return the latest at `timeout`. If you want to override this behaviour for a single call, see [vanquish_with_timeout](Gate::vanquish_with_timeout).
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// use apocalypse::{Hell, Demon};
     ///
     /// struct EchoDemon{}
@@ -335,11 +340,15 @@ impl Gate {
     /// #[tokio::main]
     /// async fn main() {
     ///     let hell = Hell::new();
-    ///     let (gate, join_handle) = hell.ignite().await.unwrap();
-    ///     // we spawn the demon
-    ///     let location = gate.spawn(EchoDemon{}).await.unwrap();
-    ///     // In order to prevent lock ups, we send this future to another task
-    ///     gate.vanquish(&location).await.unwrap();
+    ///     let join_handle = {
+    ///         // We ignite our hell instance in another span to guarantee our gate is dropped after use
+    ///         let (gate, join_handle) = hell.ignite().await.unwrap();
+    ///         // We spawn the echo demon
+    ///         let location = gate.spawn(EchoDemon{}).await.unwrap();
+    ///         // We wait until the demon fades away
+    ///         gate.vanquish(&location).await.unwrap();
+    ///         join_handle
+    ///     };
     ///     // We await the system
     ///     join_handle.await.unwrap();
     /// }
@@ -355,11 +364,62 @@ impl Gate {
         rx.await.map_err(|e| Error::TokioSend(format!("{}", e)))?
     }
 
+    /// Get rid of one demon gracefully
+    ///
+    /// With this method, you request one demon to be dropped. Notice that locations will not automatically reflect this change, and further messages sent to the dropped demon will return `Error::InvalidLocation`. This method with block until the demon confirms is no longer executing anything. There is no guarantee that all pending messages will be processed before termination.
+    /// 
+    /// If the hell instance has a default `timeout` for vanquishing demons, this function will return the latest at `timeout`. If you want to override this behaviour for a single call, see [vanquish_with_timeout](Gate::vanquish_with_timeout).
+    ///
+    /// ```rust
+    /// use apocalypse::{Hell, Demon};
+    /// use std::time::Duration;
+    ///
+    /// struct EchoDemon{}
+    ///
+    /// impl Demon for EchoDemon {
+    ///     type Input = &'static str;
+    ///     type Output = ();
+    ///     async fn handle(&mut self, message: Self::Input) -> Self::Output {
+    ///         // The demon is slow, takes 2 seconds to reply
+    ///         tokio::time::sleep(Duration::from_secs(2)).await;
+    ///         println!("{}", message);
+    ///     }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let hell = Hell::new();
+    ///     let join_handle = {
+    ///         // We ignite our hell instance in another span to guarantee our gate is dropped after use
+    ///         let (gate, join_handle) = hell.ignite().await.unwrap();
+    ///         // We spawn the echo demon
+    ///         let location = gate.spawn(EchoDemon{}).await.unwrap();
+    ///         // We wait maximum 1 second for the demon to finish whatever it is doing
+    ///         gate.vanquish_with_timeout(&location, Some(Duration::from_secs(1))).await.unwrap();
+    ///         join_handle
+    ///     };
+    ///     // We await the system
+    ///     join_handle.await.unwrap();
+    /// }
+    /// ```
+    pub async fn vanquish_with_timeout<D: 'static + Demon<Input = I, Output = O>, I: 'static + Send, O: 'static + Send>(&self, location: &Location<D>, timeout: Option<std::time::Duration>) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.hell_channel.send(HellInstruction::RemoveDemon{
+            address: location.address,
+            tx: Channel::Async(tx),
+            ignore: false,
+            force: Some(timeout)
+        }).map_err(|e| Error::TokioSend(format!("{}", e)))?;
+        rx.await.map_err(|e| Error::TokioSend(format!("{}", e)))?
+    }
+
     /// Get rid of one demon gracefully, and ignore the result
     ///
-    /// As with [send](crate::Gate::send) and [send_and_ignore](crate::Gate::send_and_ignore), this method is prefered because there is a lower chance of a lockup happening. For example, if you were to allow your own demon to vanquish itself, you should use this method.
+    /// As with [send](crate::Gate::send) and [send_and_ignore](crate::Gate::send_and_ignore), this method is prefered because there is a lower chance of a lockup happening. For example, if you were to allow your own demon to vanquish itself, you should use this method. The method fails if the vanquish request does not reach the demon.
     ///
-    /// ```rust,no_run
+    /// If the hell instance has a default `timeout` for vanquishing demons, this function will return the latest at `timeout`. If you want to override this behaviour for a single call, see [vanquish_and_ignore_with_timeout](Gate::vanquish_and_ignore_with_timeout).
+    ///
+    /// ```rust
     /// use apocalypse::{Hell, Demon};
     ///
     /// struct EchoDemon{}
@@ -375,11 +435,16 @@ impl Gate {
     /// #[tokio::main]
     /// async fn main() {
     ///     let hell = Hell::new();
-    ///     let (gate, join_handle) = hell.ignite().await.unwrap();
-    ///     // we spawn the demon
-    ///     let location = gate.spawn(EchoDemon{}).await.unwrap();
-    ///     // In order to prevent lock ups, we send this future to another task
-    ///     gate.vanquish_and_ignore(&location).unwrap();
+    ///     let join_handle = {
+    ///         // We ignite our hell instance in another span to guarantee our gate is dropped after use
+    ///         let (gate, join_handle) = hell.ignite().await.unwrap();
+    ///         // We spawn the echo demon
+    ///         let location = gate.spawn(EchoDemon{}).await.unwrap();
+    ///         // This function fails if the vanquish request does not reach the demon, but if
+    ///         // if it does, it does not block.
+    ///         gate.vanquish_and_ignore(&location).unwrap();
+    ///         join_handle
+    ///     };
     ///     // We await the system
     ///     join_handle.await.unwrap();
     /// }
@@ -399,8 +464,9 @@ impl Gate {
     ///
     /// As with [send](crate::Gate::send) and [send_and_ignore](crate::Gate::send_and_ignore), this method is prefered because there is a lower chance of a lockup happening. For example, if you were to allow your own demon to vanquish itself, you should use this method.
     ///
-    /// ```rust,no_run
+    /// ```rust
     /// use apocalypse::{Hell, Demon};
+    /// use std::time::Duration;
     ///
     /// struct EchoDemon{}
     ///
@@ -408,6 +474,8 @@ impl Gate {
     ///     type Input = &'static str;
     ///     type Output = ();
     ///     async fn handle(&mut self, message: Self::Input) -> Self::Output {
+    ///         // The demon is slow, takes 2 seconds to reply
+    ///         tokio::time::sleep(Duration::from_secs(2)).await;
     ///         println!("{}", message);
     ///     }
     /// }
@@ -415,16 +483,20 @@ impl Gate {
     /// #[tokio::main]
     /// async fn main() {
     ///     let hell = Hell::new();
-    ///     let (gate, join_handle) = hell.ignite().await.unwrap();
-    ///     // we spawn the demon
-    ///     let location = gate.spawn(EchoDemon{}).await.unwrap();
-    ///     // In order to prevent lock ups, we send this future to another task
-    ///     gate.vanquish_and_ignore_timeout(&location, std::time::Duration::from_secs(1)).unwrap();
+    ///     let join_handle = {
+    ///         // We ignite our hell instance in another span to guarantee our gate is dropped after use
+    ///         let (gate, join_handle) = hell.ignite().await.unwrap();
+    ///         // We spawn the echo demon
+    ///         let location = gate.spawn(EchoDemon{}).await.unwrap();
+    ///         // We wait maximum 1 second for the demon to finish whatever it is doing
+    ///         gate.vanquish_and_ignore_with_timeout(&location, Some(Duration::from_secs(1))).unwrap();
+    ///         join_handle
+    ///     };
     ///     // We await the system
     ///     join_handle.await.unwrap();
     /// }
     /// ```
-    pub fn vanquish_and_ignore_timeout<D: 'static + Demon<Input = I, Output = O>, I: 'static + Send, O: 'static + Send>(&self, location: &Location<D>, timeout: std::time::Duration) -> Result<(), Error> {
+    pub fn vanquish_and_ignore_with_timeout<D: 'static + Demon<Input = I, Output = O>, I: 'static + Send, O: 'static + Send>(&self, location: &Location<D>, timeout: Option<std::time::Duration>) -> Result<(), Error> {
         let (tx, rx) = mpsc::channel();
         self.hell_channel.send(HellInstruction::RemoveDemon{
             address: location.address,
@@ -447,7 +519,7 @@ impl Gate {
 
     /// Requests hell statistics
     ///
-    /// This methos returns a structure containing operation stats. The stats registered can be controlled through the hell builder
+    /// This method returns a structure containing operation stats.
     pub async fn stats(&self) -> Result<HellStats, Error> {
         let (tx, rx) = oneshot::channel();
         self.hell_channel.send(HellInstruction::Stats{tx}).map_err(|e| Error::TokioSend(format!("{}", e)))?;

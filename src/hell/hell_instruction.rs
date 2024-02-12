@@ -39,7 +39,7 @@ pub(crate) enum HellInstruction {
         /// Ignore flag, indicates if we should wait for the demon to be dead
         ignore: bool,
         /// Maximum time that we wait for the demon before dropping all messages and Futures
-        force: Option<Duration>
+        force: Option<Option<Duration>>
     },
     /// Requests for a message to be delivered to a demon
     Message {

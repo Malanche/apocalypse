@@ -46,27 +46,39 @@ async fn main() {
 
     // We create a hell for this
     let hell = Hell::new();
-    let (gate, jh) = match hell.ignite().await {
-        Ok(v) => v,
-        Err(e) => panic!("Could not light up hell, {}", e)
-    };
-    
-    // We spawn the demon in the running hell through the gate
-    let location = match gate.spawn_multiple(echo_bot_factory, 3).await {
-        Ok(v) => v,
-        Err(e) => panic!("Could not spawn the demon, {}", e)
-    };
 
-    tokio::spawn(async move {
-        let (_, _, _, _, _, _) = tokio::join!(
-            gate.send(&location, "hello world 1".to_string()),
-            gate.send(&location, "hello world 2".to_string()),
-            gate.send(&location, "hello world 3".to_string()),
-            gate.send(&location, "hello world 4".to_string()),
-            gate.send(&location, "hello world 5".to_string()),
-            gate.send(&location, "hello world 6".to_string())
-        );
-    });
+    let jh = {
+        let (gate, jh) = match hell.ignite().await {
+            Ok(v) => v,
+            Err(e) => panic!("Could not light up hell, {}", e)
+        };
+        
+        // We spawn the demon in the running hell through the gate
+        let location = match gate.spawn_multiple(echo_bot_factory, 3).await {
+            Ok(v) => v,
+            Err(e) => panic!("Could not spawn the demon, {}", e)
+        };
+
+        let gate_clone = gate.clone();
+        let location_clone = location.clone();
+    
+        tokio::spawn(async move {
+            let (_, _, _, _, _, _) = tokio::join!(
+                gate.send(&location, "hello world 1".to_string()),
+                gate.send(&location, "hello world 2".to_string()),
+                gate.send(&location, "hello world 3".to_string()),
+                gate.send(&location, "hello world 4".to_string()),
+                gate.send(&location, "hello world 5".to_string()),
+                gate.send(&location, "hello world 6".to_string())
+            );
+        });
+    
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let _ = gate_clone.vanquish_and_ignore(&location_clone);
+
+        jh
+    };
 
     // We wait for all messages to be processed.
     jh.await.unwrap();
