@@ -54,7 +54,7 @@
 //! ```
 
 pub use self::demon::{Demon, Location};
-pub use self::hell::{Hell, HellBuilder};
+pub use self::hell::{Hell, HellBuilder, HellStats};
 pub use self::gate::{Gate};
 pub use self::error::Error;
 

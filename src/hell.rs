@@ -24,7 +24,7 @@ mod mini_ws_hell;
 pub(crate) use self::demon_channels::{DemonChannels};
 mod demon_channels;
 
-pub(crate) use self::hell_stats::{HellStats};
+pub use self::hell_stats::{HellStats};
 mod hell_stats;
 
 pub(crate) use self::hell_instruction::{HellInstruction, Channel};
