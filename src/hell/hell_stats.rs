@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 #[cfg(feature = "serialize")]
 use serde::{Serialize, Deserialize};
 
+/// Basic statistics structure
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "serialize", derive(Serialize, Deserialize))]
 pub struct HellStats {

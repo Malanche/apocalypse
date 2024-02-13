@@ -64,7 +64,7 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
             log::debug!("[{}] spawn function called", demon.id());
         }
 
-        let notify = loop {
+        let vanquish_mailbox = loop {
             tokio::select! {
                 answer = answers.recv() => if let Some((idx, mut demon)) = answer {
                     // if we have pending requests, we pop them here
@@ -192,7 +192,7 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
             log::debug!("[{}] vanquish function called", demon_id);
         }
 
-        if let Some(vanquish_mailbox) = notify {
+        if let Some(vanquish_mailbox) = vanquish_mailbox {
             if vanquish_mailbox.send(()).is_err() {
                 #[cfg(feature = "full_log")]
                 log::warn!("[{}] could not notify back hell about shutdown!", <D as Demon>::multiple_id());

@@ -49,7 +49,7 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
         #[cfg(feature = "full_log")]
         log::debug!("[{}] spawn function called", self.demon.id());
 
-        let notify = loop {
+        let vanquish_mailbox = loop {
             tokio::select! {
                 res = self.killswitch.recv() => if let Some(vanquish_mailbox) = res {
                     #[cfg(feature = "full_log")]
@@ -132,7 +132,7 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
         #[cfg(feature = "full_log")]
         log::debug!("[{}] vanquish function called", demon_id);
 
-        if let Some(vanquish_mailbox) = notify {
+        if let Some(vanquish_mailbox) = vanquish_mailbox {
             if vanquish_mailbox.send(()).is_err() {
                 #[cfg(feature = "full_log")]
                 log::warn!("[{}] could not notify back hell about shutdown!", demon_id);   

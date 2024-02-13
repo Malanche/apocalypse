@@ -1,6 +1,5 @@
-use crate::{Error, Demon, Location, hell::{MiniHell, MultipleMiniHell, HellInstruction, HellStats, Channel}};
+use crate::{Error, Demon, Location, hell::{MiniHell, MultipleMiniHell, HellInstruction, HellStats}};
 use tokio::sync::{mpsc::UnboundedSender, oneshot::{self}};
-use std::sync::mpsc;
 use std::marker::PhantomData;
 #[cfg(feature = "ws")]
 use cataclysm::ws::{WebSocketThread, WebSocketReader};
@@ -19,25 +18,23 @@ use crate::hell::MiniWSHell;
 /// That is, dropping all gates finalizes hell's execution. Due to the fact that a gate is required to send messages, and some Demons will have a gate among their fields, you have to remove all Demons in posession of a Gate to shutdown Hell gracefully. This structure cannot be created without the help of a [Hell](crate::Hell) instance.
 pub struct Gate {
     /// Communication with main hell instance
-    hell_channel: UnboundedSender<HellInstruction>
+    pub(crate) hell_channel: UnboundedSender<HellInstruction>,
+    #[cfg(feature = "ws")]
+    /// Endpoint to send locations from extinct demons due to websocket close connection
+    pub(crate) on_close_tx: UnboundedSender<usize>
 }
 
 impl Clone for Gate {
     fn clone(&self) -> Self {
         Gate {
-            hell_channel: self.hell_channel.clone()
+            hell_channel: self.hell_channel.clone(),
+            #[cfg(feature = "ws")]
+            on_close_tx: self.on_close_tx.clone()
         }
     }
 }
 
 impl Gate {
-    /// Creates a new gate. For internal use only.
-    pub(crate) fn new(hell_channel: UnboundedSender<HellInstruction>) -> Gate {
-        Gate {
-            hell_channel,
-        }
-    }
-
     /// Sends a message to a demon
     ///
     /// In this actor implementaton, all messages do have to return some kind of reply. Be aware that this decision can lead to lockups if used carelessly (as the mutable access that the handle function has to the demons blocks the message processing loop until each handle call ends). If you manage to create a message-cycle (that is, a chain of requests that has as element the same actor twice), then you will end up in a lockup situation. Try to use this function **only** when necessary, keep [send_and_ignore](crate::Gate::send_and_ignore) as your first option, unless you carefully thought about the message-chains in your software.
@@ -75,6 +72,7 @@ impl Gate {
         self.hell_channel.send(HellInstruction::Message {
             tx,
             address,
+            ignore: false,
             input: Box::new(message)
         }).map_err(|e| Error::TokioSend(format!("hell channel error, {}", e)))?;
 
@@ -89,7 +87,7 @@ impl Gate {
 
     /// Sends a message to a demon, and ignore the result.
     ///
-    /// This is your go-to function when you don't have to wait for the actor to give you a response back.
+    /// This is your go-to function when you don't have to wait for the actor to give you a response back. This function fails if the request could not be delivered to the demon. If you absolutely require to call this function without awaiting, use `tokio::spawn`.
     ///
     /// ```rust
     /// use apocalypse::{Hell, Demon};
@@ -109,10 +107,10 @@ impl Gate {
     /// let (gate, jh) = Hell::new().ignite().await.unwrap();
     /// let location = gate.spawn(PrintBot).await.unwrap();
     /// // Use the send and ignore function to send a message without waiting for it
-    /// gate.send_and_ignore(&location, "Hallo, welt!").unwrap();
+    /// gate.send_and_ignore(&location, "Hallo, welt!").await.unwrap();
     /// # }
     /// ```
-    pub fn send_and_ignore<D, I, O>(&self, location: &Location<D>, message: I) -> Result<(), Error> 
+    pub async fn send_and_ignore<D, I, O>(&self, location: &Location<D>, message: I) -> Result<(), Error> 
         where 
             D: Demon<Input = I, Output = O>,
             I: 'static + Send,
@@ -124,12 +122,10 @@ impl Gate {
         self.hell_channel.send(HellInstruction::Message {
             tx,
             address,
+            ignore: true,
             input: Box::new(message)
         }).map_err(|e| Error::TokioSend(format!("hell channel error, {}", e)))?;
-
-        tokio::spawn(async move {
-            let _ = rx.await;
-        });
+        rx.await.map_err(|s| Error::TokioSend(format!("{}", s)))??;
         Ok(())
     }
 
@@ -302,7 +298,7 @@ impl Gate {
         };
 
         // We spawn the demon in a mini hell instance
-        let demon_channels = MiniWSHell::spawn(demon, location.clone(), wsr);
+        let demon_channels = MiniWSHell::spawn(demon, location.clone(), self.on_close_tx.clone(), wsr);
 
         // Second return channel, for knowing if the registration was successful
         let (tx, rx) = oneshot::channel();
@@ -357,7 +353,7 @@ impl Gate {
         let (tx, rx) = oneshot::channel();
         self.hell_channel.send(HellInstruction::RemoveDemon{
             address: location.address,
-            tx: Channel::Async(tx),
+            tx,
             ignore: false,
             force: None
         }).map_err(|e| Error::TokioSend(format!("{}", e)))?;
@@ -406,7 +402,7 @@ impl Gate {
         let (tx, rx) = oneshot::channel();
         self.hell_channel.send(HellInstruction::RemoveDemon{
             address: location.address,
-            tx: Channel::Async(tx),
+            tx,
             ignore: false,
             force: Some(timeout)
         }).map_err(|e| Error::TokioSend(format!("{}", e)))?;
@@ -415,7 +411,7 @@ impl Gate {
 
     /// Get rid of one demon gracefully, and ignore the result
     ///
-    /// As with [send](crate::Gate::send) and [send_and_ignore](crate::Gate::send_and_ignore), this method is prefered because there is a lower chance of a lockup happening. For example, if you were to allow your own demon to vanquish itself, you should use this method. The method fails if the vanquish request does not reach the demon.
+    /// As with [send](crate::Gate::send) and [send_and_ignore](crate::Gate::send_and_ignore), this method is prefered because there is a lower chance of a lockup happening. For example, if you were to allow your own demon to vanquish itself, you should use this method. The method fails if the vanquish request does not reach the demon. If you absolutely require to call this function without awaiting, use `tokio::spawn`.
     ///
     /// If the hell instance has a default `timeout` for vanquishing demons, this function will return the latest at `timeout`. If you want to override this behaviour for a single call, see [vanquish_and_ignore_with_timeout](Gate::vanquish_and_ignore_with_timeout).
     ///
@@ -442,27 +438,27 @@ impl Gate {
     ///         let location = gate.spawn(EchoDemon{}).await.unwrap();
     ///         // This function fails if the vanquish request does not reach the demon, but if
     ///         // if it does, it does not block.
-    ///         gate.vanquish_and_ignore(&location).unwrap();
+    ///         gate.vanquish_and_ignore(&location).await.unwrap();
     ///         join_handle
     ///     };
     ///     // We await the system
     ///     join_handle.await.unwrap();
     /// }
     /// ```
-    pub fn vanquish_and_ignore<D: 'static + Demon<Input = I, Output = O>, I: 'static + Send, O: 'static + Send>(&self, location: &Location<D>) -> Result<(), Error> {
-        let (tx, rx) = mpsc::channel();
-        self.hell_channel.send(HellInstruction::RemoveDemon{
+    pub async fn vanquish_and_ignore<D: 'static + Demon<Input = I, Output = O>, I: 'static + Send, O: 'static + Send>(&self, location: &Location<D>) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.hell_channel.send(HellInstruction::RemoveDemon {
             address: location.address,
-            tx: Channel::Sync(tx),
+            tx,
             ignore: true,
             force: None
         }).map_err(|e| Error::TokioSend(format!("{}", e)))?;
-        rx.recv().map_err(Error::RecvError)?
+        rx.await.map_err(|e| Error::TokioSend(format!("{}", e)))?
     }
 
     /// Get rid of one demon, and ignore the result.
     ///
-    /// As with [send](crate::Gate::send) and [send_and_ignore](crate::Gate::send_and_ignore), this method is prefered because there is a lower chance of a lockup happening. For example, if you were to allow your own demon to vanquish itself, you should use this method.
+    /// As with [send](crate::Gate::send) and [send_and_ignore](crate::Gate::send_and_ignore), this method is prefered because there is a lower chance of a lockup happening. For example, if you were to allow your own demon to vanquish itself, you should use this method. If you absolutely require to call this function without awaiting, use `tokio::spawn`.
     ///
     /// ```rust
     /// use apocalypse::{Hell, Demon};
@@ -489,37 +485,126 @@ impl Gate {
     ///         // We spawn the echo demon
     ///         let location = gate.spawn(EchoDemon{}).await.unwrap();
     ///         // We wait maximum 1 second for the demon to finish whatever it is doing
-    ///         gate.vanquish_and_ignore_with_timeout(&location, Some(Duration::from_secs(1))).unwrap();
+    ///         gate.vanquish_and_ignore_with_timeout(&location, Some(Duration::from_secs(1))).await.unwrap();
     ///         join_handle
     ///     };
     ///     // We await the system
     ///     join_handle.await.unwrap();
     /// }
     /// ```
-    pub fn vanquish_and_ignore_with_timeout<D: 'static + Demon<Input = I, Output = O>, I: 'static + Send, O: 'static + Send>(&self, location: &Location<D>, timeout: Option<std::time::Duration>) -> Result<(), Error> {
-        let (tx, rx) = mpsc::channel();
+    pub async fn vanquish_and_ignore_with_timeout<D: 'static + Demon<Input = I, Output = O>, I: 'static + Send, O: 'static + Send>(&self, location: &Location<D>, timeout: Option<std::time::Duration>) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
         self.hell_channel.send(HellInstruction::RemoveDemon{
             address: location.address,
-            tx: Channel::Sync(tx),
+            tx,
             ignore: true,
             force: Some(timeout)
         }).map_err(|e| Error::TokioSend(format!("{}", e)))?;
-        rx.recv().map_err(Error::RecvError)?
+        rx.await.map_err(|e| Error::TokioSend(format!("{}", e)))?
     }
 
     /// Stops the broker
     ///
-    /// If wait is true, the broker will wait for every single demon to finish the vanquished method
-    pub async fn extinguish(self, wait: bool) -> Result<(), Error>{
+    /// By default, the timeout will be used (if set) to put a maximum wait time for all remaining demons to finalize. You can override the behaviour for this function by using the [extinguish_with_timeout](Gate::extinguish_with_timeout)
+    ///
+    /// ```rust
+    /// use apocalypse::{Hell, Demon};
+    ///
+    /// struct EchoDemon{}
+    ///
+    /// impl Demon for EchoDemon {
+    ///     type Input = &'static str;
+    ///     type Output = ();
+    ///     async fn handle(&mut self, message: Self::Input) -> Self::Output {
+    ///         println!("{}", message);
+    ///     }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let hell = Hell::new();
+    ///     let join_handle = {
+    ///         // We ignite our hell instance in another span to guarantee our gate is dropped after use
+    ///         let (gate, join_handle) = hell.ignite().await.unwrap();
+    ///         gate.extinguish().await.unwrap();
+    ///         join_handle
+    ///     };
+    ///     // We await the system
+    ///     join_handle.await.unwrap();
+    /// }
+    /// ```
+    pub async fn extinguish(self) -> Result<(), Error>{
         let (tx, rx) = oneshot::channel();
-        self.hell_channel.send(HellInstruction::Extinguish{tx, wait}).map_err(|e| Error::TokioSend(format!("{}", e)))?;
-        rx.await.map_err(|e| Error::TokioSend(format!("{}", e)))?;
-        Ok(())
+        self.hell_channel.send(HellInstruction::Extinguish{tx, timeout: None}).map_err(|e| Error::TokioSend(format!("{}", e)))?;
+        rx.await.map_err(|e| Error::TokioSend(format!("{}", e)))?
+    }
+
+    /// Stops the broker
+    ///
+    /// Same as [extinguish](Gate::extinguish), but with an override to the timeout parameter
+    ///
+    /// ```rust
+    /// use apocalypse::{Hell, Demon};
+    ///
+    /// struct EchoDemon{}
+    ///
+    /// impl Demon for EchoDemon {
+    ///     type Input = &'static str;
+    ///     type Output = ();
+    ///     async fn handle(&mut self, message: Self::Input) -> Self::Output {
+    ///         println!("{}", message);
+    ///     }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let hell = Hell::new();
+    ///     let join_handle = {
+    ///         // We ignite our hell instance in another span to guarantee our gate is dropped after use
+    ///         let (gate, join_handle) = hell.ignite().await.unwrap();
+    ///         gate.extinguish_with_timeout(Some(std::time::Duration::from_secs(2))).await.unwrap();
+    ///         join_handle
+    ///     };
+    ///     // We await the system
+    ///     join_handle.await.unwrap();
+    /// }
+    /// ```
+    pub async fn extinguish_with_timeout(self, timeout: Option<std::time::Duration>) -> Result<(), Error>{
+        let (tx, rx) = oneshot::channel();
+        self.hell_channel.send(HellInstruction::Extinguish{tx, timeout: Some(timeout)}).map_err(|e| Error::TokioSend(format!("{}", e)))?;
+        rx.await.map_err(|e| Error::TokioSend(format!("{}", e)))?
     }
 
     /// Requests hell statistics
     ///
     /// This method returns a structure containing operation stats.
+    ///
+    /// ```rust
+    /// use apocalypse::{Hell, Demon};
+    ///
+    /// struct EchoDemon{}
+    ///
+    /// impl Demon for EchoDemon {
+    ///     type Input = &'static str;
+    ///     type Output = ();
+    ///     async fn handle(&mut self, message: Self::Input) -> Self::Output {
+    ///         println!("{}", message);
+    ///     }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let hell = Hell::new();
+    ///     let join_handle = {
+    ///         // We ignite our hell instance in another span to guarantee our gate is dropped after use
+    ///         let (gate, join_handle) = hell.ignite().await.unwrap();
+    ///         println!("{:?}", gate.stats().await.unwrap());
+    ///         join_handle
+    ///     };
+    ///     // We await the system
+    ///     join_handle.await.unwrap();
+    /// }
+    /// ```
     pub async fn stats(&self) -> Result<HellStats, Error> {
         let (tx, rx) = oneshot::channel();
         self.hell_channel.send(HellInstruction::Stats{tx}).map_err(|e| Error::TokioSend(format!("{}", e)))?;

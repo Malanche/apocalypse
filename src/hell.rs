@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap},
     time::Duration
 };
+use futures::future::join_all;
 use crate::{Gate, Error};
 use tokio::{
     sync::{
@@ -27,7 +28,7 @@ mod demon_channels;
 pub use self::hell_stats::{HellStats};
 mod hell_stats;
 
-pub(crate) use self::hell_instruction::{HellInstruction, Channel};
+pub(crate) use self::hell_instruction::{HellInstruction};
 mod hell_instruction;
 
 pub(crate) use self::mini_hell_instruction::{MiniHellInstruction};
@@ -168,8 +169,15 @@ impl Hell {
 
         // Message communication for the gate
         let (hell_channel, mut instructions) = mpsc::unbounded_channel();
+        // Incoming close messages from websockets demons
+        let (on_close_tx, mut on_close_rx) = mpsc::unbounded_channel();
         
-        let gate = Gate::new(hell_channel);
+        let gate = Gate {
+            hell_channel,
+            #[cfg(feature = "ws")]
+            on_close_tx
+        };
+
         let gate_clone = gate.clone();
 
         let jh = tokio::spawn(async move {
@@ -180,10 +188,16 @@ impl Hell {
             let (zombie_tx, mut zombie_rx) = mpsc::unbounded_channel();
 
             let clean = loop {
+                #[cfg(feature = "full_log")]
+                log::trace!("[Hell] entering message process loop iteration, waiting for incoming message...");
                 tokio::select! {
                     value = instructions.recv() => if let Some(instruction) = value {
+                        #[cfg(feature = "full_log")]
+                        log::debug!("[Hell] entering instruction handler");
                         match instruction {
                             HellInstruction::CreateAddress{tx} => {
+                                #[cfg(feature = "full_log")]
+                                log::trace!("[Hell] received address creation request");
                                 let current_counter = self.counter;
                                 if tx.send(current_counter).is_ok() {
                                     #[cfg(feature = "full_log")]
@@ -193,8 +207,12 @@ impl Hell {
                                     #[cfg(feature = "full_log")]
                                     log::debug!("[Hell] failed to notify address {} reservation", current_counter);
                                 }
+                                #[cfg(feature = "full_log")]
+                                log::trace!("[Hell] leaving address creation request");
                             },
                             HellInstruction::RegisterDemon{address, demon_channels, tx} => {
+                                #[cfg(feature = "full_log")]
+                                log::trace!("[Hell] received demon registration request");
                                 let added = match self.demons.entry(address) {
                                     std::collections::hash_map::Entry::Occupied(_) => {
                                         #[cfg(feature = "full_log")]
@@ -214,9 +232,26 @@ impl Hell {
                                     log::debug!("[Hell] dangling demon with address {}, as it could not be notified that it was registered. removing.", address);
                                     self.demons.remove(&address);
                                 }
+
+                                #[cfg(feature = "full_log")]
+                                log::trace!("[Hell] leaving demon registration request");
                             },
-                            HellInstruction::Message{tx, address, input} => {
+                            HellInstruction::Message{tx, address, ignore, input} => {
+                                #[cfg(feature = "full_log")]
+                                log::trace!("[Hell] received message delivery request to demon at location {}", address);
                                 if let Some(demon_channels) = self.demons.get_mut(&address) {
+                                    let tx = if ignore {
+                                        let (ignore_tx, ignore_rx) = oneshot::channel();
+                                        tokio::spawn(async move {
+                                            let _ = ignore_rx.await;
+                                            #[cfg(feature = "full_log")]
+                                            log::trace!("[Hell] ignored reply received");
+                                        });
+                                        let _ = tx.send(Ok(Box::new(())));
+                                        ignore_tx
+                                    } else {
+                                        tx
+                                    };
                                     if demon_channels.instructions.send(MiniHellInstruction::Message(tx, input)).is_err() {
                                         self.failed_messages += 1;
                                         #[cfg(feature = "full_log")]
@@ -230,14 +265,17 @@ impl Hell {
                                         log::debug!("[Hell] invalid location message for address {} could not be delivered back", address);
                                     };
                                 }
+                                #[cfg(feature = "full_log")]
+                                log::trace!("[Hell] leaving message delivery request");
                             },
                             HellInstruction::RemoveDemon{address, tx, ignore, force} => {
+                                #[cfg(feature = "full_log")]
+                                log::trace!("[Hell] received demon removal request for demon at location {}", address);
                                 // We simply drop the channel, so the mini hell will close automatically
                                 let removed = self.demons.remove(&address);
                                 if let Some(demon_channels) = removed {
                                     // This channel will allow the zombie counter to be decreased, when necessary
                                     let (demon_tx, demon_rx) = oneshot::channel();
-                                    let (killswitch_tx, killswitch) = oneshot::channel();
 
                                     // force timeout has the prefference
                                     let timeout = match force {
@@ -245,20 +283,25 @@ impl Hell {
                                         None => self.timeout
                                     };
 
-                                    if let Some(timeout) = timeout {
+                                    let killswitch = if let Some(timeout) = timeout {
                                         #[cfg(feature = "full_log")]
-                                        log::debug!("[Hell] killswitch trigger requested in {}ms", timeout.as_millis());
+                                        log::trace!("[Hell] killswitch trigger requested in {}ms", timeout.as_millis());
                                         // We send the killswitch with a timeout
                                         let demon_channel_killswitch = demon_channels.killswitch;
+                                        let (killswitch_tx, killswitch) = oneshot::channel();
                                         tokio::spawn(async move {
                                             tokio::time::sleep(timeout).await;
+                                            #[cfg(feature = "full_log")]
+                                            log::trace!("[Hell] sending killswitch trigger now");
                                             // We ignore the killswitch send, because maybe the demon_channel is already obsolete
                                             let _ = demon_channel_killswitch.send(killswitch_tx);
                                         });
+                                        Some(killswitch)
                                     } else {
                                         #[cfg(feature = "full_log")]
-                                        log::debug!("[Hell] no timeout was set for this vanquish call");
-                                    }
+                                        log::trace!("[Hell] no timeout was set for this vanquish call");
+                                        None
+                                    };
 
                                     if demon_channels.instructions.send(MiniHellInstruction::Shutdown(demon_tx)).is_err() {
                                         #[cfg(feature = "full_log")]
@@ -271,26 +314,27 @@ impl Hell {
                                         let _address_copy = address.clone();
                                         let zombie_tx_clone = zombie_tx.clone();
                                         let waiter = async move {
-                                            tokio::select! {
-                                                res = demon_rx => {
-                                                    if res.is_err() {
-                                                        #[cfg(feature = "full_log")]
-                                                        log::debug!("[Hell] could not wait for demon to be vanquished, {}", _address_copy);
-                                                    } else {
-                                                        #[cfg(feature = "full_log")]
-                                                        log::debug!("[Hell] gracefull vanquish, {}", _address_copy);
+                                            if let Some(killswitch) = killswitch {
+                                                tokio::select! {
+                                                    res = demon_rx => {
+                                                        if res.is_ok() {
+                                                            #[cfg(feature = "full_log")]
+                                                            log::debug!("[Hell] gracefull vanquish executed properly at address {}", _address_copy);
+                                                        }
+                                                    },
+                                                    res = killswitch => {
+                                                        if res.is_ok() {
+                                                            #[cfg(feature = "full_log")]
+                                                            log::debug!("[Hell] killswitch vanquish executed properly at address {}", _address_copy);
+                                                        }
                                                     }
-                                                },
-                                                res = killswitch => {
-                                                    if res.is_err() {
-                                                        #[cfg(feature = "full_log")]
-                                                        log::debug!("[Hell] could not wait for demon to be killswitch vanquished, {}", _address_copy);
-                                                    } else {
-                                                        #[cfg(feature = "full_log")]
-                                                        log::debug!("[Hell] killswitch vanquish requested, sending to address {}", _address_copy);
-                                                    }
+                                                };
+                                            } else {
+                                                if demon_rx.await.is_ok() {
+                                                    #[cfg(feature = "full_log")]
+                                                    log::debug!("[Hell] gracefull vanquish executed properly at address {}", _address_copy);
                                                 }
-                                            };
+                                            }
 
                                             if ignore {
                                                 if zombie_tx_clone.send(()).is_err() {
@@ -301,6 +345,8 @@ impl Hell {
                                         };
                                         // if the message should be ignored, we need to move it to a different thread
                                         if ignore {
+                                            #[cfg(feature = "full_log")]
+                                            log::debug!("[Hell] ignore requested, zombie demon count increased by one");
                                             self.zombie_counter += 1;
                                             tokio::spawn(waiter);
                                         } else {
@@ -320,12 +366,17 @@ impl Hell {
                                         log::debug!("[Hell] could not notify that demon with address {} was not found", address);
                                     }
                                 }
+
+                                #[cfg(feature = "full_log")]
+                                log::trace!("[Hell] leaving demon removal request");
                             },
                             HellInstruction::Stats{tx} => {
+                                #[cfg(feature = "full_log")]
+                                log::trace!("[Hell] received stats request");
                                 if tx.send(HellStats {
                                     spawned_demons: self.counter,
                                     active_demons: self.demons.len(),
-                                    zombie_demons: 0,
+                                    zombie_demons: self.zombie_counter,
                                     successful_messages: self.successful_messages,
                                     failed_messages: self.failed_messages,
                                     ignition_time: self.ignition_time.clone()
@@ -333,44 +384,117 @@ impl Hell {
                                     #[cfg(feature = "full_log")]
                                     log::debug!("[Hell] could not return hell stats, channel closed");
                                 }
+                                #[cfg(feature = "full_log")]
+                                log::trace!("[Hell] leaving stats request");
                             },
-                            HellInstruction::Extinguish{tx, wait} => {
-                                break Some((tx, wait));
+                            HellInstruction::Extinguish{tx, timeout} => {
+                                #[cfg(feature = "full_log")]
+                                log::trace!("[Hell] extinguish message received");
+                                break Some((tx, timeout));
                             }
                         }
+                        #[cfg(feature = "full_log")]
+                        log::trace!("[Hell] leaving instruction handler");
                     } else {
                         #[cfg(feature = "full_log")]
-                        log::info!("[Hell] all gates to hell have been dropped");
+                        log::debug!("[Hell] all gates to hell have been dropped");
                         break None;
                     },
                     value = zombie_rx.recv() => if value.is_some() {
                         self.zombie_counter -= 1;
+                        #[cfg(feature = "full_log")]
+                        log::debug!("[Hell] zombie counter decrease requested, new zombie count: {}", self.zombie_counter);
                     } else {
+                        #[cfg(feature = "full_log")]
                         log::error!("[Hell] impossible failure, channel was closed unexpectedly");
+                        break None;
+                    },
+                    value = on_close_rx.recv() => if let Some(location) = value {
+                        #[cfg(feature = "full_log")]
+                        log::debug!("[Hell] demon closed due to websockets lost connection");
+                        let _ = self.demons.remove(&location);
+                    } else {
+                        #[cfg(feature = "full_log")]
+                        log::error!("[Hell] impossible failure, on_close channel was closed unexpectedly");
                         break None;
                     }
                 }
+
+                #[cfg(feature = "full_log")]
+                log::trace!("[Hell] message loop iteration ended");
             };
 
-            if let Some((tx, wait)) = clean {
-                for (_id, demon_channels) in self.demons {
-                    let (tx, rx) = oneshot::channel();
-                    if demon_channels.instructions.send(MiniHellInstruction::Shutdown(tx)).is_err() {
+            if let Some((tx, timeout)) = clean {
+                let mut handles = Vec::new();
+                for (id, demon_channels) in self.demons {
+                    #[cfg(feature = "full_log")]
+                    log::debug!("[Hell] sending demon with id {} shutdown request", id);
+
+                    // This channel will allow the zombie counter to be decreased, when necessary
+                    let (demon_tx, demon_rx) = oneshot::channel();
+                    let (killswitch_tx, killswitch) = oneshot::channel();
+
+                    // force timeout has the prefference
+                    let timeout = match timeout {
+                        Some(v) => v,
+                        None => self.timeout
+                    };
+
+                    if let Some(timeout) = timeout {
                         #[cfg(feature = "full_log")]
-                        log::debug!("[Hell] could not notify demon thread the requested demon at address {} removal", _id);
-                    }
-                    if wait {
-                        if rx.await.is_err() {
+                        log::trace!("[Hell] killswitch trigger requested in {}ms", timeout.as_millis());
+                        // We send the killswitch with a timeout
+                        let demon_channel_killswitch = demon_channels.killswitch;
+                        tokio::spawn(async move {
+                            tokio::time::sleep(timeout).await;
                             #[cfg(feature = "full_log")]
-                            log::debug!("[Hell] could not wait for demon to be vanquished, {}", _id);
-                        }
+                            log::trace!("[Hell] sending killswitch trigger now");
+                            // We ignore the killswitch send, because maybe the demon_channel is already obsolete
+                            let _ = demon_channel_killswitch.send(killswitch_tx);
+                        });
+                    } else {
+                        #[cfg(feature = "full_log")]
+                        log::trace!("[Hell] no timeout was set for this vanquish call");
+                    }
+
+                    if demon_channels.instructions.send(MiniHellInstruction::Shutdown(demon_tx)).is_err() {
+                        #[cfg(feature = "full_log")]
+                        log::debug!("[Hell] could not notify demon thread the requested demon at address {} removal", id);
+                    } else {
+                        let _address_copy = id.clone();
+                        let waiter = async move {
+                            tokio::select! {
+                                res = demon_rx => {
+                                    if res.is_ok() {
+                                        #[cfg(feature = "full_log")]
+                                        log::debug!("[Hell] gracefull vanquish, {}", _address_copy);
+                                    }
+                                },
+                                res = killswitch => {
+                                    if res.is_ok() {
+                                        #[cfg(feature = "full_log")]
+                                        log::debug!("[Hell] killswitch vanquish requested, sending to address {}", _address_copy);
+                                    }
+                                }
+                            };
+                        };
+                        
+                        handles.push(tokio::spawn(waiter));
                     }
                 }
-                if tx.send(()).is_err() {
+
+                join_all(handles).await;
+
+                if tx.send(Ok(())).is_err() {
                     #[cfg(feature = "full_log")]
                     log::debug!("[Hell] could not notify gate about extintion");
                 }
             }
+
+            // We force this thing to move to this thread
+            #[cfg(not(feature = "ws"))]
+            let _ = on_close_tx.closed();
+
             #[cfg(feature = "full_log")]
             log::info!("Broker stops \u{1f9ca}");
         });

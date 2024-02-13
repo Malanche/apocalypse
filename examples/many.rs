@@ -85,7 +85,7 @@ async fn main() {
         log::info!("Received chain {}", m1);
         assert_eq!("helle werld!!!", &m1);
         // And we kill the emphasis bot to vanquish all gates
-        gate.vanquish_and_ignore(&nsb_location).unwrap();
+        gate.vanquish_and_ignore(&nsb_location).await.unwrap();
     });
 
     // We wait for all messages to be processed.
