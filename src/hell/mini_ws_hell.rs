@@ -67,16 +67,16 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
         #[cfg(feature = "full_log")]
         log::debug!("[{}] spawn function called", self.demon.id());
 
-        let vanquish_mailbox = loop {
+        let (mut vanquish_mailbox, killswitched) = loop {
             tokio::select! {
                 res = self.killswitch.recv() => if let Some(vanquish_mailbox) = res {
                     #[cfg(feature = "full_log")]
                     log::debug!("[{}] killswitch message received, forced demon shutdown", self.demon.id());
-                    break Some(vanquish_mailbox);
+                    break (Some(vanquish_mailbox), true);
                 } else {
                     #[cfg(feature = "full_log")]
                     log::debug!("[{}] all incoming killswitch channels closed (impossible)", self.demon.id());
-                    break None;
+                    break (None, true);
                 },
                 res = messages.recv() => if let Some((tx, input)) = res {
                     if let Ok(input) = input.downcast::<I>() {
@@ -91,11 +91,11 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
                             res = self.killswitch.recv() => if let Some(vanquish_mailbox) = res {
                                 #[cfg(feature = "full_log")]
                                 log::debug!("[{}] killswitch signal received, aborting current handle execution!", self.demon.id());
-                                break Some(vanquish_mailbox);
+                                break (Some(vanquish_mailbox), true);
                             } else {
                                 #[cfg(feature = "full_log")]
                                 log::debug!("[{}] all incoming killswitch channels closed (impossible), aborting current handle execution", self.demon.id());
-                                break None;
+                                break (None, true);
                             }
                         };
                         #[cfg(feature = "full_log")]
@@ -113,7 +113,7 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
                 } else {
                     #[cfg(feature = "full_log")]
                     log::debug!("[{}] all incoming channels closed (impossible)", self.demon.id());
-                    break None;
+                    break (None, false);
                 },
                 frame = self.wsr.try_read_frame() => match frame {
                     Ok(frame) => {
@@ -125,7 +125,7 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
                             log::debug!("[{}] on_close executed", self.demon.id(), );
 
                             let _ = self.on_close_tx.send(self.location.address);
-                            break None;
+                            break (None, false);
                         }
 
                         self.demon.on_message(frame.message).await;
@@ -137,7 +137,7 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
 
                         let _ = self.on_close_tx.send(self.location.address);
 
-                        break None;
+                        break (None, false);
                     }
                 },
                 res = self.instructions.recv() => match res {
@@ -145,7 +145,7 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
                         MiniHellInstruction::Shutdown(tx) => {
                             #[cfg(feature = "full_log")]
                             log::debug!("[{}] shutdown signal received", self.demon.id());
-                            break Some(tx);
+                            break (Some(tx), false);
                         },
                         MiniHellInstruction::Message(result_mailbox, message) => {
                             #[cfg(feature = "full_log")]
@@ -159,7 +159,7 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
                     None => {
                         #[cfg(feature = "full_log")]
                         log::info!("[{}] all channels to this demon are now closed", self.demon.id());
-                        break None;
+                        break (None, false);
                     }
                 }
             }
@@ -170,10 +170,26 @@ impl<I: 'static + Send, O: 'static + Send, D: 'static + Demon<Input = I, Output 
 
         // We call the vanquished function from this demon
         #[cfg(feature = "full_log")]
-        log::debug!("[{}] calling vanquish function", demon_id);
-        self.demon.vanquished().await;
-        #[cfg(feature = "full_log")]
-        log::debug!("[{}] vanquish function called", demon_id);
+        log::trace!("[{}] calling vanquish function", demon_id);
+        if !killswitched {
+            tokio::select!{
+                res = self.killswitch.recv() => if let Some(vm) = res {
+                    #[cfg(feature = "full_log")]
+                    log::trace!("[{}] killswitch message received, canceling vanquished function", demon_id);
+                    vanquish_mailbox = Some(vm);
+                } else {
+                    #[cfg(feature = "full_log")]
+                    log::trace!("[{}] all incoming killswitch channels closed (impossible)", demon_id);
+                },
+                _ = self.demon.vanquished() => {
+                    #[cfg(feature = "full_log")]
+                    log::trace!("[{}] vanquish function called", demon_id);
+                }
+            }
+        } else {
+            #[cfg(feature = "full_log")]
+            log::trace!("[{}] skipping vanquish function due to killswitch detection", demon_id);
+        }
 
         if let Some(vanquish_mailbox) = vanquish_mailbox {
             if vanquish_mailbox.send(()).is_err() {
