@@ -1,10 +1,10 @@
 use chrono::{DateTime, Utc};
-#[cfg(feature = "serialize")]
+#[cfg(feature = "serde")]
 use serde::{Serialize, Deserialize};
 
 /// Basic statistics structure
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "serialize", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct HellStats {
     /// Amount of spawned demons through the lifetime of this hell instance
     pub spawned_demons: usize,
